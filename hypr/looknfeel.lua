@@ -53,10 +53,12 @@
 -- edge/corner snaps it to half/quarter of the usable workspace, like
 -- Windows/Ubuntu. Threshold gap is snap:window_gap.
 --
--- Gaps: Omarchy's defaults (gaps_in = 5, gaps_out = 10) leave dead space at
--- the screen edges and between windows. Set all gaps to zero so tiled windows
--- use every pixel of the usable workspace; a lone window below additionally
--- drops its frame so it renders truly edge-to-edge.
+-- Gaps & frames: Omarchy's defaults (gaps_in = 5, gaps_out = 10, border_size
+-- = 2) leave dead space at the screen edges, between windows, and draw a
+-- 2px border line on every tiled window. Zero it all: windows use every
+-- pixel of the usable workspace, and since borders are gone, the focus
+-- indicator switches to dimming — the active window stays full-bright while
+-- inactive windows are slightly dimmed (see decoration below).
 hl.config({
   general = {
     snap = {
@@ -65,15 +67,21 @@ hl.config({
 
     gaps_in = 0,
     gaps_out = 0,
+    border_size = 0,
+  },
+
+  decoration = {
+    dim_inactive = true,
+    dim_strength = 0.12,
   },
 })
 
--- Single-window flush: a workspace holding exactly one visible tiled window
--- (w[tv1]) — or one floating window (f[1]) — draws it without a border or
--- corner rounding, so the single window looks like a fullscreen surface.
--- Selector semantics from the Hyprland docs: "w[(flags)X]" matches a
--- workspace whose *visible tiled* window count is exactly 1, so it only ever
--- applies when the workspace holds a lone window.
+-- Lone-window flush guard: a workspace holding exactly one visible tiled
+-- window (w[tv1]) — or one floating window (f[1]) — stays flush even if gaps
+-- or frames are raised in the base general block above later. With the current
+-- zeros these rules are already satisfied; they exist so the guarantee holds
+-- under future config changes. Selector semantics: "w[(flags)X]" matches a
+-- workspace whose *visible tiled* window count is exactly 1.
 -- https://wiki.hypr.land/Configuring/Basics/Workspace-Rules/#smart-gaps
 hl.workspace_rule({ workspace = "w[tv1]", gaps_out = 0, gaps_in = 0 })
 hl.workspace_rule({ workspace = "f[1]",   gaps_out = 0, gaps_in = 0 })
