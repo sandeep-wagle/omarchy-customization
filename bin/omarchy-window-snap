@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+# BSP window management for Hyprland's dwindle layout (Omarchy).
+# Usage: omarchy-window-snap <action>
+#
+# Actions (Super+Arrow):
+#   left / right
+#       Swap the focused window with its dwindle neighbor in that direction.
+#       At the workspace edge (no neighbor), no-op.
+#   up
+#       Toggle maximize/restore. If not maximized, maximize within the usable
+#       workspace area (stays a layout citizen via dwindle's fullscreen mode).
+#       If already maximized, restore to the previous tiling position.
+#   down
+#       Move the focused window down into the adjacent dwindle region (swap
+#       with whatever is there). If maximized, restore it instead.
+#
+# Actions (Super+Alt+Arrow):
+#   resize-left / resize-right / resize-up / resize-down
+#       Resize the shared boundary between the focused window and its neighbor.
+#       The adjacent window compensates, keeping the workspace fully covered.
+#
+# Model
+#   Relies on Hyprland's built-in dwindle layout which already implements a
+#   binary space partition tree. No custom geometry computation needed.
+#   Dispatches go through Hyprland-Lua's hl.dsp.* DSL first (active on this
+#   build), falling back to the classic space-separated dispatcher form so
+#   the script also works on plain-hyprlang configs.
+
+set -u
+
+ACTION="${1:-}"
+case "$ACTION" in
+  left|right|up|down|resize-left|resize-right|resize-up|resize-down) ;;
+  *) echo "usage: omarchy-window-snap <left|right|up|down|resize-left|resize-right|resize-up|resize-down>" >&2; exit 2 ;;
+esac
+
+# --- dispatch: Lua DSL first, classic form as fallback ---------------------
+dispatch() {
+  local lua_call="$1"; shift
+  hyprctl dispatch "$lua_call" >/dev/null 2>&1 || hyprctl dispatch "$@" >/dev/null 2>&1
+}
+
+# --- focused window -------------------------------------------------------
+WIN="$(hyprctl activewindow -j)"
+[ -n "$WIN" ] || exit 0
+
+# Maximized state. This build exposes .fullscreen as an integer where
+# 1 == "maximized in layout" (fullscreen_state internal=1). Older builds
+# use .fullscreenMode. Treat either as maximized when it equals 1.
+MAX_STATE="$(jq -r 'if (.fullscreen // 0) > 0 then 1 else (if (.fullscreenMode // 0) > 0 then 1 else 0 end) end' <<<"$WIN")"
+
+WS_ID="$(jq -r '.workspace.id' <<<"$WIN")"
+[ "${WS_ID:-0}" -ge 1 ] 2>/dev/null || exit 0
+
+# --- monitor usable area (for resize step sizing) -------------------------
+MON_ID="$(jq -r '.monitor' <<<"$WIN")"
+MONJ="$(hyprctl monitors -j -a)"
+[ -n "$MONJ" ] || exit 0
+
+read -r mon_w mon_h res_l res_t res_r res_b \
+  < <(jq -r --argjson mid "${MON_ID:-0}" '.[] | select(.id == $mid)
+        | [.width, .height, .reserved[0], .reserved[1], .reserved[2], .reserved[3]] | @tsv' <<<"$MONJ")
+mon_w=${mon_w:-1920}; mon_h=${mon_h:-1080}
+res_l=${res_l:-0}; res_t=${res_t:-0}; res_r=${res_r:-0}; res_b=${res_b:-0}
+
+read -r go_t go_r go_b go_l < <(hyprctl getoption general:gaps_out -j | jq -r '.css')
+: "${go_t:=10}" "${go_r:=10}" "${go_b:=10}" "${go_l:=10}"
+aw=$(( mon_w - res_l - res_r - go_l - go_r ))
+ah=$(( mon_h - res_t - res_b - go_t - go_b ))
+[ "$aw" -gt 0 ] && [ "$ah" -gt 0 ] || exit 0
+
+rstep_x=$(( (aw * 3 + 50) / 100 )); [ "$rstep_x" -lt 20 ] && rstep_x=20
+rstep_y=$(( (ah * 3 + 50) / 100 )); [ "$rstep_y" -lt 20 ] && rstep_y=20
+
+# --- Super+Alt+Arrow: resize the shared dwindle boundary -------------------
+case "$ACTION" in
+  resize-left|resize-right|resize-up|resize-down)
+    read -r cur_w cur_h < <(jq -r '.size | @tsv' <<<"$WIN")
+    cur_w=${cur_w:-0}; cur_h=${cur_h:-0}
+    case "$ACTION" in
+      resize-left)   new_w=$(( cur_w - rstep_x )); new_h=$cur_h ;;
+      resize-right)  new_w=$(( cur_w + rstep_x )); new_h=$cur_h ;;
+      resize-up)     new_w=$cur_w; new_h=$(( cur_h - rstep_y )) ;;
+      resize-down)   new_w=$cur_w; new_h=$(( cur_h + rstep_y )) ;;
+    esac
+    [ "$new_w" -lt 80 ] && new_w=80
+    [ "$new_h" -lt 80 ] && new_h=80
+    dispatch "hl.dsp.window.resize({ x = $new_w, y = $new_h })" resizeactive exact "$new_w" "$new_h"
+    exit 0 ;;
+esac
+
+# --- Super+Up: toggle maximize within layout ------------------------------
+if [ "$ACTION" = up ]; then
+  if [ "$MAX_STATE" -eq 1 ]; then
+    dispatch 'hl.dsp.window.fullscreen_state({ internal = 0, client = 0 })' fullscreen 0
+  else
+    dispatch 'hl.dsp.window.fullscreen_state({ internal = 1, client = 0 })' fullscreen 1
+  fi
+  exit 0
+fi
+
+# --- Super+Down: move into region below, or restore if maximized ----------
+if [ "$ACTION" = down ]; then
+  if [ "$MAX_STATE" -eq 1 ]; then
+    dispatch 'hl.dsp.window.fullscreen_state({ internal = 0, client = 0 })' fullscreen 0
+  else
+    dispatch 'hl.dsp.window.swap({ direction = "d" })' swapwindow d
+  fi
+  exit 0
+fi
+
+# --- left / right: swap with neighbour; at edge -> no-op -------------------
+if [ "$MAX_STATE" -eq 1 ]; then
+  dispatch 'hl.dsp.window.fullscreen_state({ internal = 0, client = 0 })' fullscreen 0
+fi
+case "$ACTION" in
+  left)  dispatch 'hl.dsp.window.swap({ direction = "l" })' swapwindow l ;;
+  right) dispatch 'hl.dsp.window.swap({ direction = "r" })' swapwindow r ;;
+esac
+exit 0

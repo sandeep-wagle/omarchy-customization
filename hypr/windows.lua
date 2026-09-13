@@ -1,0 +1,6 @@
+-- Phase 3: Dwindle-native BSP tiling.
+--
+-- Removed the `maximize = true` windowrule. Dwindle handles all layout
+-- natively: windows tile into a binary space partition tree. The maximize
+-- action is now user-initiated via Super+Up (toggle maximize within layout).
+-- Floating windows (dialogs, scratchpad, OSD) are left untouched by dwindle.
