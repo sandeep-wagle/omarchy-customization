@@ -11,17 +11,17 @@ development (the "phases" the configs still comment about) is summarized in the
 
 ### Fixed
 
-- **Consistent window gaps** (`hypr/looknfeel.lua`) — override Omarchy's
-  defaults (in 5 / out 10) with `gaps_in = 4` / `gaps_out = 4`.
+- **Zero window gaps** (`hypr/looknfeel.lua`) — override Omarchy's defaults
+  (in 5 / out 10) with `gaps_in = 0` / `gaps_out = 0` so tiled windows use
+  every pixel of the usable workspace, at the screen edges and between each
+  other.
 - **Single-window flush via smart-gaps workspace rules** (`hypr/looknfeel.lua`)
   — a workspace holding exactly one visible tiled window (`w[tv1]`, or one
-  floating window `f[1]`) drops all gaps, borders and rounding so the window
-  fills the usable area edge-to-edge; gaps reappear when a second window joins.
-  This is the official Hyprland-Lua replacement for the old mainline
-  `dwindle.no_gaps_when_only`, which this build rejects as an unknown config key
-  (that key is removed, so the config loads with zero errors). Note: enabling
-  the single-window-aspect-ratio toggle keeps a centered 1:1 video window and
-  deliberately overrides the flush behavior.
+  floating window `f[1]`) draws it without a border or corner rounding, so the
+  single window renders truly edge-to-edge. This is the official Hyprland-Lua
+  replacement for the old mainline `dwindle.no_gaps_when_only`, which this
+  build rejects as an unknown config key (that key is removed, so the config
+  loads with zero errors).
 - **Bar workspace reservation follows bar mode** (`omarchy/plugins/bar-auto-hide`)
   — the always-visible bar is now an exclusive top layer that reserves its strip
   (tiled windows start below it), while auto-hide/off releases the strip so

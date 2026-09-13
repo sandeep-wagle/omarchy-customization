@@ -348,7 +348,7 @@ deleted during install.
 | Visual `Alt+Tab` / `Super+Tab` (mogtab, current-monitor scope) | Stable |
 | Dynamic dwindle tiling (2/3/4-window arrangements) | Working — provided by Hyprland's dwindle engine |
 | Multi-monitor move (`Super+Shift+↑/↓`) and monitor-scoped switching | Working — implemented; needs real multi-monitor hardware to field-test |
-| Single-window aspect-ratio toggle | Working — enabled via `toggles/` state file |
+| Single-window aspect-ratio toggle | Working — enabled via `toggles/` state file; overrides the flush (single window fills by default) |
 | Flatpak app icons (`.desktop` under flatpak export dirs) | Working — implemented in the resolver; not yet field-tested on a machine with flatpaks |
 | Bottom dock | Not included — the taskbar lives in the top bar |
 

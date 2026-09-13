@@ -53,41 +53,39 @@
 -- edge/corner snaps it to half/quarter of the usable workspace, like
 -- Windows/Ubuntu. Threshold gap is snap:window_gap.
 --
--- Window gaps: override Omarchy's defaults (gaps_in = 5, gaps_out = 10 —
--- inconsistent outer vs inner spacing) with one small, deliberate gap; gaps
--- only recede when a single window fills its workspace (see smart gaps below).
+-- Gaps: Omarchy's defaults (gaps_in = 5, gaps_out = 10) leave dead space at
+-- the screen edges and between windows. Set all gaps to zero so tiled windows
+-- use every pixel of the usable workspace; a lone window below additionally
+-- drops its frame so it renders truly edge-to-edge.
 hl.config({
   general = {
     snap = {
       enabled = true,
     },
 
-    gaps_in = 4,
-    gaps_out = 4,
+    gaps_in = 0,
+    gaps_out = 0,
   },
 })
 
--- "Smart gaps" / single-window flush: a workspace holding exactly one
--- visible tiled window (w[tv1]) — or one floating window (f[1]) — drops all
--- gaps, borders and rounding so the single window fills the usable area
--- edge-to-edge; gaps reappear as soon as a second window joins. This is the
--- official Hyprland-Lua replacement for the old mainline `dwindle:
--- no_gaps_when_only` option, which this build does not expose (it is
--- rejected as an unknown config key).
+-- Single-window flush: a workspace holding exactly one visible tiled window
+-- (w[tv1]) — or one floating window (f[1]) — draws it without a border or
+-- corner rounding, so the single window looks like a fullscreen surface.
+-- Selector semantics from the Hyprland docs: "w[(flags)X]" matches a
+-- workspace whose *visible tiled* window count is exactly 1, so it only ever
+-- applies when the workspace holds a lone window.
 -- https://wiki.hypr.land/Configuring/Basics/Workspace-Rules/#smart-gaps
--- (The optional "single-window aspect-ratio" toggle overrides the flush by
--- design: it keeps one window as a centered 1:1 region instead.)
 hl.workspace_rule({ workspace = "w[tv1]", gaps_out = 0, gaps_in = 0 })
 hl.workspace_rule({ workspace = "f[1]",   gaps_out = 0, gaps_in = 0 })
 hl.window_rule({
-  name        = "no-gaps-wtv1",
+  name        = "no-frame-wtv1",
   match       = { float = false, workspace = "w[tv1]" },
 
   border_size = 0,
   rounding    = 0,
 })
 hl.window_rule({
-  name        = "no-gaps-f1",
+  name        = "no-frame-f1",
   match       = { float = false, workspace = "f[1]" },
 
   border_size = 0,
