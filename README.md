@@ -276,10 +276,16 @@ taskbar are one Quickshell surface.
 
 **Bar modes** (toggle with `Super+Shift+Space` or `omarchy-toggle-bar-mode`):
 
-- **Always-visible** — the bar stays on screen.
+- **Always-visible** — the bar stays on screen and its layer is exclusive: the
+  top strip of the workspace is reserved, so tiled windows start below the bar
+  and never slide underneath it.
 - **Auto-hide** — the bar retracts off-screen when idle and no pointer is over
   it, and reveals when the pointer nears the top edge (activation zone ~6px,
-  reveal delay 60ms, hide delay 600ms — all tunable from the bar config).
+  reveal delay 60ms, hide delay 600ms — all tunable from the bar config). The
+  reserved strip is released in this mode, so windows use the full screen height
+  and the bar only overlays while revealed.
+
+Switching modes resizes the tiled windows immediately (no relaunch needed).
 
 The mode persists across login via a state flag under
 `~/.local/state/omarchy/toggles`; the bar reads it on startup.

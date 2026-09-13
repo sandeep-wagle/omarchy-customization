@@ -9,6 +9,23 @@ development (the "phases" the configs still comment about) is summarized in the
 
 ## [Unreleased]
 
+### Fixed
+
+- **Consistent window gaps** (`hypr/looknfeel.lua`) — override Omarchy's
+  defaults (in 5 / out 10) with `gaps_in = 4` / `gaps_out = 4`, and enable
+  `dwindle.no_gaps_when_only` so a single tiled window fills its workspace
+  edge-to-edge. Note: enabling the single-window-aspect-ratio toggle keeps a
+  centered 1:1 video window and deliberately overrides the flush behavior.
+- **Bar workspace reservation follows bar mode** (`omarchy/plugins/bar-auto-hide`)
+  — the always-visible bar is now an exclusive top layer that reserves its strip
+  (tiled windows start below it), while auto-hide/off releases the strip so
+  windows use the full screen. Toggling the mode resizes existing windows
+  immediately; nothing needs a relaunch.
+- **Portable helper paths** (`hypr/bindings.lua`) — invoke `omarchy-window-snap`
+  and `omarchy-toggle-bar-mode` by bare name (already on `PATH`) instead of
+  hard-coding `/home/sandy`, so the keybinding layer survives installs to any
+  user home.
+
 ### Planned
 - **Screenshots** — a `screenshots/` directory ready for community captures of
   the bar/taskbar on different hardware.
