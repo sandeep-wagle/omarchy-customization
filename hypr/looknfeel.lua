@@ -54,11 +54,8 @@
 -- Windows/Ubuntu. Threshold gap is snap:window_gap.
 --
 -- Window gaps: override Omarchy's defaults (gaps_in = 5, gaps_out = 10 —
--- inconsistent outer vs inner spacing) with one small, deliberate gap. With
--- no_gaps_when_only set, a single tiled window fills the entire usable
--- workspace with zero gap; gaps only appear between multiple windows.
--- (The optional "single-window aspect-ratio" toggle overrides the flush
--- behavior by design: it keeps one window as a centered 1:1 region instead.)
+-- inconsistent outer vs inner spacing) with one small, deliberate gap; gaps
+-- only recede when a single window fills its workspace (see smart gaps below).
 hl.config({
   general = {
     snap = {
@@ -68,8 +65,31 @@ hl.config({
     gaps_in = 4,
     gaps_out = 4,
   },
+})
 
-  dwindle = {
-    no_gaps_when_only = true,
-  },
+-- "Smart gaps" / single-window flush: a workspace holding exactly one
+-- visible tiled window (w[tv1]) — or one floating window (f[1]) — drops all
+-- gaps, borders and rounding so the single window fills the usable area
+-- edge-to-edge; gaps reappear as soon as a second window joins. This is the
+-- official Hyprland-Lua replacement for the old mainline `dwindle:
+-- no_gaps_when_only` option, which this build does not expose (it is
+-- rejected as an unknown config key).
+-- https://wiki.hypr.land/Configuring/Basics/Workspace-Rules/#smart-gaps
+-- (The optional "single-window aspect-ratio" toggle overrides the flush by
+-- design: it keeps one window as a centered 1:1 region instead.)
+hl.workspace_rule({ workspace = "w[tv1]", gaps_out = 0, gaps_in = 0 })
+hl.workspace_rule({ workspace = "f[1]",   gaps_out = 0, gaps_in = 0 })
+hl.window_rule({
+  name        = "no-gaps-wtv1",
+  match       = { float = false, workspace = "w[tv1]" },
+
+  border_size = 0,
+  rounding    = 0,
+})
+hl.window_rule({
+  name        = "no-gaps-f1",
+  match       = { float = false, workspace = "f[1]" },
+
+  border_size = 0,
+  rounding    = 0,
 })

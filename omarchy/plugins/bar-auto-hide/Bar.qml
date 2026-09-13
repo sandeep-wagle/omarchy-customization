@@ -1346,9 +1346,9 @@ Item {
     //   auto-hide (or the `bar-off` flag) -> ExclusionMode.Ignore releases
     //     the reserved zone so windows use the full screen height and the bar
     //     only overlays while revealed.
-    // Some compositors add a fixed offset on top of a top-anchored reserved
-    // layer; when present it affects the stock bar the same way, so no layout
-    // compensation is applied here.
+    // (Some compositor/Hyprland config errors can add a fixed offset on top
+    // of a top-anchored reserved layer; measured once here, it was an artifact
+    // of a broken Hyprland config key, not of the bar.)
     // The flag -> probe -> FileView pipeline updates autoHideMode, which flips
     // this live, so toggling the mode resizes existing windows immediately.
     exclusionMode: (root.autoHideMode || root.barHidden) ? ExclusionMode.Ignore : ExclusionMode.Auto
