@@ -52,10 +52,24 @@
 -- Phase 2: native drag-to-snap. Dragging a floating window to a monitor
 -- edge/corner snaps it to half/quarter of the usable workspace, like
 -- Windows/Ubuntu. Threshold gap is snap:window_gap.
+--
+-- Window gaps: override Omarchy's defaults (gaps_in = 5, gaps_out = 10 —
+-- inconsistent outer vs inner spacing) with one small, deliberate gap. With
+-- no_gaps_when_only set, a single tiled window fills the entire usable
+-- workspace with zero gap; gaps only appear between multiple windows.
+-- (The optional "single-window aspect-ratio" toggle overrides the flush
+-- behavior by design: it keeps one window as a centered 1:1 region instead.)
 hl.config({
   general = {
     snap = {
       enabled = true,
     },
+
+    gaps_in = 4,
+    gaps_out = 4,
+  },
+
+  dwindle = {
+    no_gaps_when_only = true,
   },
 })
