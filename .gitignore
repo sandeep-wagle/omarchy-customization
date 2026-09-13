@@ -1,0 +1,9 @@
+# Editor / OS cruft
+.DS_Store
+*.swp
+*~
+
+# Local runtime state (never committed)
+.local/
+*.rgb
+*.png
