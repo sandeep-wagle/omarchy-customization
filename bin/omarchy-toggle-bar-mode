@@ -1,0 +1,29 @@
+#!/bin/bash
+
+# omarchy:summary=Toggle the top bar between always-visible and auto-hide
+
+# Single source of truth for the mode is the `bar-auto-hide` state flag under
+# ~/.local/state/omarchy/toggles. The bar's Quickshell probe owns the runtime
+# behaviour: it reads the flag on startup (so the mode persists across login)
+# and on the syncMode IPC nudge below. This script is only a thin read ->
+# opposite -> persist -> apply transition.
+
+FLAG_DIR="$HOME/.local/state/omarchy/toggles"
+FLAG="$FLAG_DIR/bar-auto-hide"
+
+if [[ -f "$FLAG" ]]; then
+  rm -f "$FLAG"
+  MODE="always"
+else
+  mkdir -p "$FLAG_DIR"
+  touch "$FLAG"
+  MODE="auto"
+fi
+
+# The shell's watch on the toggles directory can miss flag changes that land in
+# quick succession (and is disabled entirely when QS_DISABLE_FILE_WATCHER=1),
+# so nudge the bar to re-read the flag; quiet best-effort so the toggle still
+# works when the shell is not up.
+omarchy-shell -q omarchy.bar syncMode
+
+echo "Bar mode: $MODE"
