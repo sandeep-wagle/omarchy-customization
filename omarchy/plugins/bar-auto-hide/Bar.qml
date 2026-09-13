@@ -1339,11 +1339,19 @@ Item {
     // keeps the surface alive, so showing is only a margin change.
     visible: !remapGuard.remapping
 
-    // Floating overlay: the bar never reserves workspace space, in any mode.
-    // Exclusion is unconditionally Ignore, so the reserved area, usable
-    // height, gaps, and window geometry never change when the bar shows or
-    // hides — a reveal/collapse is a purely visual margin animation.
-    exclusionMode: ExclusionMode.Ignore
+    // Workspace reservation follows the bar mode:
+    //   always-visible (= auto-hide OFF) -> ExclusionMode.Auto reserves the
+    //     bar's height along the anchored edge, so tiled windows start exactly
+    //     below the bar and no content hides underneath it.
+    //   auto-hide (or the `bar-off` flag) -> ExclusionMode.Ignore releases
+    //     the reserved zone so windows use the full screen height and the bar
+    //     only overlays while revealed.
+    // Some compositors add a fixed offset on top of a top-anchored reserved
+    // layer; when present it affects the stock bar the same way, so no layout
+    // compensation is applied here.
+    // The flag -> probe -> FileView pipeline updates autoHideMode, which flips
+    // this live, so toggling the mode resizes existing windows immediately.
+    exclusionMode: (root.autoHideMode || root.barHidden) ? ExclusionMode.Ignore : ExclusionMode.Auto
 
     ScreenMoveRemap {
       id: remapGuard
