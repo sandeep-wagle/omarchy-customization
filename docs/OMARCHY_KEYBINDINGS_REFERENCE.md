@@ -1,6 +1,9 @@
 # Omarchy Standardized Keybindings Reference
 
-Generated after reconfiguration to follow universal Linux/Windows/terminal conventions.
+Reference for the standards-oriented keybinding layer in `hypr/bindings.lua`
+— conventional, widely familiar bindings rather than bespoke ones. Terminal,
+tmux, Vim, and application-level `Ctrl` conventions are left to the
+applications.
 
 ---
 
@@ -36,10 +39,10 @@ Generated after reconfiguration to follow universal Linux/Windows/terminal conve
 
 | Key | Action | Notes |
 |-----|--------|-------|
-| **Super + Left** | **Snap window left** | **Standard: Win+Left** |
-| **Super + Right** | **Snap window right** | **Standard: Win+Right** |
-| **Super + Up** | **Maximize window** | **Standard: Win+Up** |
-| **Super + Down** | **Restore window** | **Standard: Win+Down** |
+| **Super + Left** | **Move/swap window left** (dwindle) | Edge = no-op |
+| **Super + Right** | **Move/swap window right** (dwindle) | Edge = no-op |
+| **Super + Up** | **Maximize within layout (toggle)** | Standard Win+Up behavior |
+| **Super + Down** | **Move window down / restore** | Restores if maximized |
 | **Super + Ctrl + Left** | Focus window left | Alternative navigation |
 | **Super + Ctrl + Right** | Focus window right | Alternative navigation |
 | **Super + Ctrl + Up** | Focus window up | Alternative navigation |
@@ -188,7 +191,7 @@ Generated after reconfiguration to follow universal Linux/Windows/terminal conve
 | **Super + Comma** | Dismiss notification |
 | **Super + Shift + Comma** | Dismiss all notifications |
 | **Super + Ctrl + Comma** | Toggle notification silence |
-| **Super + Shift + Space** | Toggle top bar |
+| **Super + Shift + Space** | Toggle top bar mode (always-visible ↔ auto-hide) |
 | **Super + Ctrl + Space** | Background switcher |
 | **Super + Shift + Ctrl + Space** | Theme menu |
 | **Super + Backspace** | Toggle window transparency |
@@ -238,7 +241,7 @@ LAUNCHER                   → Super + Space
 | Super + L | Toggle workspace layout | **Lock screen** | Standard Super+L |
 | Super + Shift + Left/Right | Swap window | Move to prev/next workspace | Standard workspace move |
 | Super + Shift + Up/Down | Swap window | Move to monitor up/down | Multi-monitor standard |
-| Super + Left/Right/Up/Down | Focus window | **Snap/Maximize/Restore** | Windows/Ubuntu standard |
+| Super + Left/Right/Up/Down | Focus window | **Spatial move/swap + maximize** | Familiar Win+Arrow spatial behavior |
 | Super + C/V/X | Universal copy/paste/cut | **Removed** | Hijacked Super layer; apps use Ctrl+C/V/X |
 | Super + Print | Color picker | **Fullscreen screenshot** | Standard PrintScreen behavior |
 | Ctrl + Alt + Delete | Close all windows | **Removed** | Dangerous (system reboot) |
