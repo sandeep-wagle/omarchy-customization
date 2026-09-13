@@ -72,18 +72,18 @@ hl.unbind("SUPER + CTRL + RIGHT")
 --                at the bottom edge, restores from maximized instead
 
 -- Super+Arrow = spatial move/snap
-o.bind("SUPER + LEFT", "Swap window left", "/home/sandy/.local/bin/omarchy-window-snap left")
-o.bind("SUPER + RIGHT", "Swap window right", "/home/sandy/.local/bin/omarchy-window-snap right")
-o.bind("SUPER + UP", "Toggle maximize in layout", "/home/sandy/.local/bin/omarchy-window-snap up")
-o.bind("SUPER + DOWN", "Move window down / restore", "/home/sandy/.local/bin/omarchy-window-snap down")
+o.bind("SUPER + LEFT", "Swap window left", "omarchy-window-snap left")
+o.bind("SUPER + RIGHT", "Swap window right", "omarchy-window-snap right")
+o.bind("SUPER + UP", "Toggle maximize in layout", "omarchy-window-snap up")
+o.bind("SUPER + DOWN", "Move window down / restore", "omarchy-window-snap down")
 
 -- Super+Alt+Arrow = resize shared boundary between window and neighbor
 --   Alt+Left  → grow left region   Alt+Right → grow right region
 --   Alt+Up    → grow above         Alt+Down  → grow below
-o.bind("SUPER + ALT + LEFT", "Resize window (narrower)", "/home/sandy/.local/bin/omarchy-window-snap resize-left")
-o.bind("SUPER + ALT + RIGHT", "Resize window (wider)", "/home/sandy/.local/bin/omarchy-window-snap resize-right")
-o.bind("SUPER + ALT + UP", "Resize window (shorter)", "/home/sandy/.local/bin/omarchy-window-snap resize-up")
-o.bind("SUPER + ALT + DOWN", "Resize window (taller)", "/home/sandy/.local/bin/omarchy-window-snap resize-down")
+o.bind("SUPER + ALT + LEFT", "Resize window (narrower)", "omarchy-window-snap resize-left")
+o.bind("SUPER + ALT + RIGHT", "Resize window (wider)", "omarchy-window-snap resize-right")
+o.bind("SUPER + ALT + UP", "Resize window (shorter)", "omarchy-window-snap resize-up")
+o.bind("SUPER + ALT + DOWN", "Resize window (taller)", "omarchy-window-snap resize-down")
 
 -- Super+Ctrl+Arrow = focus navigation
 o.bind("SUPER + CTRL + LEFT", "Focus left", hl.dsp.focus({ direction = "l" }))
@@ -163,7 +163,7 @@ o.bind("CTRL + SHIFT + M", "Toggle microphone mute", "omarchy-audio-input-mute",
 hl.unbind("SUPER + SHIFT + SPACE")
 
 -- Super+Shift+Space = Toggle top bar mode (always-visible <-> auto-hide)
-o.bind("SUPER + SHIFT + SPACE", "Toggle top bar mode", "/home/sandy/.local/bin/omarchy-toggle-bar-mode")
+o.bind("SUPER + SHIFT + SPACE", "Toggle top bar mode", "omarchy-toggle-bar-mode")
 
 -- ============================================================
 -- UTILITY BINDINGS (keep useful custom ones)
