@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "com.sandy.taskbar",
+  "name": "Taskbar",
+  "version": "1.0.0",
+  "author": "Sandy",
+  "description": "Windows/Ubuntu-style taskbar listing open windows on the current workspace, clickable to focus.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "TaskbarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Taskbar",
+    "description": "Icons/labels for apps open on the current workspace, click to focus",
+    "category": "Compositor",
+    "allowMultiple": false
+  }
+}

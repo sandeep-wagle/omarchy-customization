@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "me.sandy.snap-preview",
+  "name": "Window snap preview",
+  "version": "1.0.0",
+  "author": "Sandy",
+  "description": "Live highlight of the destination zone while dragging a window toward an edge or corner.",
+  "kinds": [
+    "panel"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "panel": "SnapPreview.qml"
+  }
+}

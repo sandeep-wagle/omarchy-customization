@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "id": "bar.auto-hide",
+  "name": "Bar (Auto-Hide)",
+  "version": "1.0.0",
+  "author": "Omarchy",
+  "description": "Status bar with widgets and auto-hide hover mode",
+  "kinds": [
+    "bar"
+  ],
+  "entryPoints": {
+    "bar": "Bar.qml"
+  }
+}
