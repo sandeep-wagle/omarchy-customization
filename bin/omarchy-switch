@@ -1,0 +1,1309 @@
+#!/usr/bin/env python3
+"""omarchy-switch — visual app switcher for Hyprland (Omarchy / Hyprland-Lua).
+
+Compact horizontal cards: individual window thumbnail + app logo + clean name.
+  open [next|prev]   show the picker (Alt+Tab / 4-finger swipe)
+  move <+/-n>        move the selection one card
+  close [--focus]    commit: focus the selected address, then quit (Alt-release)
+  commit             alias for `close --focus`
+  cancel             dismiss without switching
+  list [profile]     dump item metadata as JSON (headless)
+  gui [start_idx]    launch the picker window (leaf process)
+  daemon [--foreground]  background thumbnail cache (socket2 -> grim -g)
+  cache <address>    capture one window thumbnail into the cache now
+
+Previews are grim-captured BEFORE the picker maps, then cropped to each
+client's own geometry and scaled by the monitor scale, so the switcher can
+never capture itself and cards stay compact instead of giant screenshots.
+
+Activation relies on Hyprland release-binds (ALT_L / ALT_R -> `close`), not
+GTK key state. Enter / click also activate. Fullscreen is never toggled:
+focusing a fullscreen window restores its fullscreen state automatically.
+"""
+
+import json
+import os
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from pathlib import Path
+
+import gi
+
+gi.require_version("Gtk", "4.0")
+gi.require_version("Gdk", "4.0")
+gi.require_version("GdkPixbuf", "2.0")
+gi.require_version("Gio", "2.0")
+from gi.repository import Gtk, Gdk, GdkPixbuf, GLib, Gio
+
+NAME = "omarchy.switch"
+HOME = os.path.expanduser("~")
+SOCK = f"/run/user/{os.getuid()}/{NAME}-{os.getuid()}.sock"
+PID = f"{HOME}/.local/state/omarchy/switch/pid"
+CACHE_DIR = Path(f"/tmp/omarchy_previews")
+CACHE_MAX_FILES = 64
+
+DESKTOP_DIRS = [
+    f"{HOME}/.local/share/flatpak/exports/share/applications",
+    "/var/lib/flatpak/exports/share/applications",
+    f"{HOME}/.local/share/applications",
+    "/usr/local/share/applications",
+    "/usr/share/applications",
+]
+
+CARD_W, CARD_H = 220, 118
+FOOTER_H = 50
+ROW_H = CARD_H + FOOTER_H
+BX = 8
+MX = 12
+PICKER_DWELL_MS = 140
+SEL_CLASS = "sel"
+
+
+def run(cmd, timeout=12):
+    try:
+        return subprocess.run(cmd, capture_output=True, timeout=timeout).stdout.decode("utf-8", "replace")
+    except Exception:
+        return ""
+
+
+def hyprctl_j(which):
+    out = run(["hyprctl", "-j", which]).strip()
+    if not out:
+        return []
+    try:
+        return json.loads(out)
+    except Exception:
+        return []
+
+
+def dispatch(lua_expr):
+    """Run a Hyprland-Lua dispatcher expression (table-arg syntax).
+
+    On vanilla Hyprland (no Lua), the same call path falls back to the
+    classic `focuswindow address:...` form — see focus_address().
+    """
+    return run(["hyprctl", "dispatch", lua_expr])
+
+
+def focus_address(addr):
+    """Focus an exact client address. Returns True if it became active.
+
+    Primary path is Hyprland-Lua (`hl.dsp.focus`), which is what
+    `hyprctl dispatch` expects on Omarchy. If that does not land (e.g.
+    vanilla Hyprland), fall back to the classic dispatcher form
+    `hyprctl dispatch focuswindow address:<ADDR>`.
+    """
+    if not addr:
+        return False
+    expr = f'hl.dsp.focus({{ window = "address:{addr}" }})'
+    for _ in range(4):
+        dispatch(expr)
+        time.sleep(0.08)
+        if active_addr() == addr:
+            return True
+    # Vanilla-Hyprland fallback (classic dispatcher syntax).
+    try:
+        subprocess.run(["hyprctl", "dispatch", "focuswindow",
+                        f"address:{addr}"],
+                       capture_output=True, timeout=12)
+    except Exception:
+        pass
+    time.sleep(0.08)
+    return active_addr() == addr
+
+
+def active_addr():
+    out = run(["hyprctl", "-j", "activewindow"]).strip()
+    try:
+        return (json.loads(out) or {}).get("address")
+    except Exception:
+        return None
+
+
+# ------------------------------------------------------------ desktop db -----
+_desktop_db = None
+
+
+def load_desktop_db():
+    global _desktop_db
+    if _desktop_db is not None:
+        return _desktop_db
+    import configparser
+    _desktop_db = []
+    for d in DESKTOP_DIRS:
+        p = Path(d)
+        if not p.exists():
+            continue
+        for f in p.glob("*.desktop"):
+            try:
+                cp = configparser.ConfigParser()
+                with open(f, "r", encoding="utf-8", errors="replace") as fh:
+                    cp.read_file(fh)
+                if not cp.has_section("Desktop Entry"):
+                    continue
+                se = cp["Desktop Entry"]
+                if se.get("Type", "").strip().lower() != "application":
+                    continue
+                if se.get("NoDisplay", "false").strip().lower() == "true":
+                    continue
+                _desktop_db.append({
+                    "name": se.get("Name", "").strip() or f.stem,
+                    "icon": se.get("Icon", "").strip(),
+                    "exec": (se.get("Exec", "").strip().split()[0] if se.get("Exec") else "").lower(),
+                    "wmclass": se.get("StartupWMClass", "").strip().lower(),
+                    "file": f.stem,
+                })
+            except Exception:
+                pass
+    return _desktop_db
+
+
+def app_info(app_class):
+    """Return (display name, icon name) for a Hyprland window class."""
+    db = load_desktop_db()
+    cl = (app_class or "").lower()
+    best = None
+    for e in db:
+        if e["wmclass"] and e["wmclass"] == cl:
+            best = e
+            break
+        if e["file"].lower() == cl:
+            best = e
+            break
+        ex = e["exec"]
+        if ex and (ex == cl or cl.startswith(ex + "-")):
+            best = e
+            break
+    if best is not None:
+        return best["name"], best["icon"] or app_class
+    base = (app_class or "Window").rsplit(".", 1)[-1]
+    parts = base.split("-")
+    if len(parts) > 1 and parts[-1].strip().lower() in {
+            "origin", "development", "desktop", "stable", "bin", "dev"}:
+        parts = parts[:-1]
+    if not parts:
+        parts = [base]
+    return " ".join(p[:1].upper() + p[1:] for p in parts), app_class
+
+
+# ----------------------------------------------------------- window list -----
+def pick_monitor():
+    ms = hyprctl_j("monitors")
+    for m in ms:
+        if m.get("focused") and m.get("mapped"):
+            return m
+    for m in ms:
+        if m.get("mapped"):
+            return m
+    return ms[0] if ms else None
+
+
+def window_items(mon=None):
+    if mon is None:
+        mon = pick_monitor()
+    if mon is None:
+        return []
+    mon_id = str(mon.get("id", -1))
+    cur_ws = mon.get("activeWorkspace", {}).get("id", -2)
+    clients = hyprctl_j("clients")
+    any_fs = any(
+        w.get("mapped")
+        and str(w.get("monitor", "")) == mon_id
+        and (w.get("workspace", {}).get("id", -2) == cur_ws)
+        and (int(w.get("fullscreen", 0) or 0) > 0)
+        and not w.get("hidden", False)
+        for w in clients
+    )
+    items = []
+    for w in clients:
+        if not w.get("mapped"):
+            continue
+        if w.get("class") == NAME or w.get("app_id") == NAME:
+            continue
+        if str(w.get("monitor", "")) != mon_id:
+            continue
+        fs = int(w.get("fullscreen", 0) or 0)
+        ws = w.get("workspace", {}).get("id", -2)
+        on_view = ws == cur_ws and not w.get("hidden", False)
+        previewable = on_view and not (any_fs and fs <= 0)
+        name, icon = app_info(w.get("class") or "")
+        items.append({
+            "address": w.get("address"),
+            "class": w.get("class") or "",
+            "title": w.get("title") or "",
+            "name": name,
+            "icon": icon,
+            "at": w.get("at", [0, 0]),
+            "size": w.get("size", [0, 0]),
+            "fullscreen": fs,
+            "on_view": on_view,
+            "previewable": previewable,
+            "ws": ws,
+        })
+    items.sort(key=lambda i: (not i["on_view"], i["address"]))
+    a = active_addr()
+    if a:
+        for k, it in enumerate(items):
+            if it["address"] == a:
+                items.insert(0, items.pop(k))
+                break
+    return items
+
+
+# --------------------------------------------------------------- capture -----
+def capture_monitor(mon):
+    """grim the monitor's visible frame; GdkPixbuf in physical pixels."""
+    if mon is None:
+        return None
+    tmp = tempfile.mkstemp(suffix=".png")[1]
+    run(["grim", "-o", mon.get("name", str(mon.get("id", 0))), tmp])
+    try:
+        return GdkPixbuf.Pixbuf.new_from_file(tmp)
+    except Exception:
+        return None
+    finally:
+        try:
+            os.unlink(tmp)
+        except Exception:
+            pass
+
+
+def crop_to_window(pb, mon, at, size):
+    """Crop the monitor frame to a window's own physical region (clamped)."""
+    if pb is None:
+        return None
+    s = float(mon.get("scale") or 1.0)
+    x = max(0, min(int(round(at[0] * s)), pb.get_width() - 1))
+    y = max(0, min(int(round(at[1] * s)), pb.get_height() - 1))
+    x2 = min(int(round((at[0] + size[0]) * s)), pb.get_width())
+    y2 = min(int(round((at[1] + size[1]) * s)), pb.get_height())
+    if x2 - x < 4 or y2 - y < 4:
+        return None
+    try:
+        return pb.new_subpixbuf(x, y, x2 - x, y2 - y)
+    except Exception:
+        return None
+
+
+def pixbuf_to_texture(pb):
+    if pb is None:
+        return None
+    if not pb.get_has_alpha():
+        pb = pb.add_alpha(True, 0, 0, 0)
+    return Gdk.MemoryTexture.new(
+        pb.get_width(), pb.get_height(), Gdk.MemoryFormat.R8G8B8A8,
+        GLib.Bytes.new(pb.get_pixels()), pb.get_rowstride())
+
+
+def round_tile(src):
+    """Aspect-fit a preview into a texture (rounded corners are CSS-clipped)."""
+    if src is None:
+        return None
+    w, h = src.get_width(), src.get_height()
+    if not w or not h:
+        return None
+    tw = min(256, max(48, w))
+    th = max(int(tw * h / w), 24)
+    try:
+        sc = src.scale_simple(tw, th, GdkPixbuf.InterpType.BILINEAR)
+    except Exception:
+        sc = src
+    out = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, True, 8, tw, th)
+    sc.composite(out, 0, 0, tw, th, 0, 0, 1, 1,
+                 GdkPixbuf.InterpType.BILINEAR, 255)
+    return pixbuf_to_texture(out)
+
+
+def placeholder_tile():
+    pb = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, True, 8, 256, 144)
+    pb.fill(0x20222866)
+    return round_tile(pb)
+
+
+_ICON_FILES = {}
+
+
+def _icon_file(cand, size):
+    """Resolve an app icon name to a loadable image file (bounded scan, cached)."""
+    if not cand:
+        return None
+    if cand.startswith("/"):
+        return cand if os.path.exists(cand) else None
+    if cand in _ICON_FILES:
+        return _ICON_FILES[cand]
+    home = os.path.expanduser("~")
+    roots = list(dict.fromkeys([
+        os.environ.get("XDG_DATA_HOME", os.path.join(home, ".local", "share")),
+        os.path.join(home, ".icons"),
+        "/usr/local/share/icons",
+        "/usr/share/icons",
+        "/usr/share/pixmaps",
+    ]))
+    best, best_delta = None, 10 ** 9
+    for r in roots:
+        if not os.path.isdir(r):
+            continue
+        subs = [r] + [os.path.join(r, e) for e in os.listdir(r)]
+        for t in subs:
+            apps = os.path.join(t, "apps")
+            if not os.path.isdir(apps):
+                continue
+            for ext in ("png", "svg", "xpm", "svgz"):
+                p = os.path.join(apps, f"{cand}.{ext}")
+                if not os.path.isfile(p):
+                    continue
+                sz = os.path.basename(os.path.dirname(apps))
+                try:
+                    n = int(sz.split("x")[0]) if "x" in sz else (64 if sz == "scalable" else 0)
+                except Exception:
+                    n = 0
+                d = abs(n - size)
+                if d <= best_delta:
+                    best_delta, best = d, p
+    _ICON_FILES[cand] = best
+    return best
+
+
+def icon_pixbuf(icon_name, app_class, size=48):
+    try:
+        select = []
+        for c in (icon_name or "", app_class or "", "application-x-executable"):
+            c = (c or "").split(",")[0]
+            if c and c not in select:
+                select.append(c)
+        for cand in select:
+            f = _icon_file(cand, size)
+            if f:
+                try:
+                    pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(f, size, size, True)
+                    if pb is not None:
+                        return pb
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return None
+
+
+def load_app_icon(icon_name, app_class):
+    pb = icon_pixbuf(icon_name, app_class, 24)
+    if pb is None:
+        return None
+    return pixbuf_to_texture(pb)
+
+
+# -------------------------------------------------- thumbnail cache -----
+def cache_file(addr):
+    """Cache path for a client address (sanitized for filenames)."""
+    safe = (addr or "").replace(":", "_").replace("/", "_")
+    return CACHE_DIR / f"{safe}.png"
+
+
+def load_cached_pixbuf(addr):
+    """Load a cached thumbnail pixbuf, or None if missing/unreadable."""
+    if not addr:
+        return None
+    try:
+        p = cache_file(addr)
+        if p.is_file() and p.stat().st_size > 0:
+            return GdkPixbuf.Pixbuf.new_from_file(str(p))
+    except Exception:
+        pass
+    return None
+
+
+def save_pixbuf_cache(pb, addr):
+    """Persist a pixbuf thumbnail for later switcher opens (best-effort)."""
+    if pb is None or not addr:
+        return
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        pb.savev(str(cache_file(addr)), "png", [], [])
+        prune_cache()
+    except Exception:
+        pass
+
+
+def prune_cache():
+    """Bound cache size (delete oldest beyond CACHE_MAX_FILES)."""
+    try:
+        files = sorted(CACHE_DIR.glob("0x*.png"),
+                       key=lambda p: p.stat().st_mtime)
+        while len(files) > CACHE_MAX_FILES:
+            try:
+                files.pop(0).unlink()
+            except Exception:
+                break
+    except Exception:
+        pass
+
+
+def initial_texture(it):
+    """Synchronous card texture: cached screenshot if present, else icon tile.
+
+    Never returns None — always falls back to the high-resolution app icon
+    tile so off-screen / other-workspace windows never show blank boxes.
+    """
+    try:
+        pb = load_cached_pixbuf(it.get("address"))
+        if pb is not None:
+            tex = round_tile(pb)
+            if tex is not None:
+                return tex
+    except Exception:
+        pass
+    return placeholder_tile(it)
+
+
+def cache_window_shot(addr, delay=0.0):
+    """grim-capture one client region into the thumbnail cache.
+
+    Looks the client's live geometry up via `hyprctl clients` (layout
+    coords, which is what `grim -g` expects) and stores
+    /tmp/omarchy_previews/<address>.png. Best-effort; never raises.
+    """
+    try:
+        if delay:
+            time.sleep(delay)
+        target = None
+        for w in hyprctl_j("clients"):
+            if w.get("address") == addr and w.get("mapped"):
+                target = w
+                break
+        if target is None:
+            return False
+        at, sz = target.get("at", [0, 0]), target.get("size", [0, 0])
+        try:
+            x, y, wdt, hgt = int(at[0]), int(at[1]), int(sz[0]), int(sz[1])
+        except Exception:
+            return False
+        if wdt < 4 or hgt < 4:
+            return False
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = tempfile.mkstemp(suffix=".png")[1]
+        try:
+            subprocess.run(["grim", "-g", f"{x},{y} {wdt}x{hgt}", tmp],
+                           capture_output=True, timeout=12)
+            if os.path.isfile(tmp) and os.path.getsize(tmp) > 0:
+                pb = GdkPixbuf.Pixbuf.new_from_file(tmp)
+                save_pixbuf_cache(pb, addr)
+                return True
+        except Exception:
+            pass
+        finally:
+            try:
+                os.unlink(tmp)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return False
+
+
+def placeholder_tile(it):
+    """Opaque dark tile with the app logo centered (for windows with no crop)."""
+    try:
+        pb = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, True, 8, 256, 144)
+        pb.fill(0xff1e1f26)
+        ic = icon_pixbuf(it.get("icon"), it.get("class"), 48)
+        if ic is not None:
+            w, h = ic.get_width(), ic.get_height()
+            tw = 84
+            th = max(1, min(84, int(tw * h / max(1, w))))
+            try:
+                ic = ic.scale_simple(tw, th, GdkPixbuf.InterpType.BILINEAR)
+            except Exception:
+                pass
+            dx, dy = (256 - ic.get_width()) // 2, (144 - ic.get_height()) // 2
+            ic.composite(pb, dx, dy, ic.get_width(), ic.get_height(),
+                         dx, dy, 1, 1, GdkPixbuf.InterpType.BILINEAR, 255)
+        return round_tile(pb)
+    except Exception:
+        return None
+
+
+# --------------------------------------------------------- pid / socket ------
+def read_pid():
+    try:
+        with open(PID) as f:
+            return int(f.read().strip())
+    except Exception:
+        return None
+
+
+def alive(pid):
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except Exception:
+        return False
+
+
+def socket_send(line):
+    if not os.path.exists(SOCK):
+        return False
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(2)
+        s.connect(SOCK)
+        s.sendall(line.encode())
+        s.close()
+        return True
+    except Exception:
+        return False
+
+
+def send_wait(line, max_wait=3.0):
+    """Send a command to the running picker. If the GUI is still starting up
+    and has not bound its socket yet, briefly poll for it before giving up.
+    Never retries against a stale/dead owner."""
+    if socket_send(line):
+        return True
+    pid = read_pid()
+    if not alive(pid):
+        return False
+    deadline = time.time() + max_wait
+    while time.time() < deadline:
+        time.sleep(0.05)
+        if socket_send(line):
+            return True
+    return False
+
+
+# ------------------------------------------------------------------ GUI ------
+class Switcher:
+    def __init__(self, items, textures, start=0):
+        self.items = items
+        self.tex = textures
+        self.idx = start % len(items) if items else 0
+        self.done = False
+        self.cards = []
+        self.pics = []
+        self.win = None
+        self.ready = False
+        self.pending = []
+        self.p_lock = threading.Lock()
+        self.app = Gtk.Application.new(NAME,
+                                       Gio.ApplicationFlags.FLAGS_NONE)
+        self.app.connect("activate", self.on_activate)
+
+    def apply_preview(self, k, tex):
+        try:
+            if k < len(self.pics) and self.pics[k] is not None:
+                self.pics[k].set_paintable(tex)
+            if 0 <= k < len(self.tex):
+                self.tex[k] = tex
+        except Exception:
+            pass
+        return False
+
+    def load_previews(self, mon, items):
+        """Background decode: cached thumbnails first, then live grim crops.
+
+        Wayland does not render off-screen / other-workspace windows, so a
+        live grim crop can only cover currently visible clients. For every
+        other card we paint the background-cached thumbnail
+        (/tmp/omarchy_previews/<address>.png, captured by `daemon` while the
+        window was last active); cards with no cache keep the icon tile set
+        synchronously by initial_texture() — never a blank box.
+        """
+        try:
+            # 1) Paint cached thumbnails for non-visible windows immediately.
+            for k, it in enumerate(items):
+                if self.done:
+                    return
+                if it.get("previewable"):
+                    continue
+                try:
+                    pb = load_cached_pixbuf(it.get("address"))
+                    if pb is not None:
+                        tex = round_tile(pb)
+                        if tex is not None:
+                            GLib.idle_add(self.apply_preview, k, tex)
+                except Exception:
+                    pass
+            # 2) Live-capture the visible frame, crop, display AND refresh cache.
+            frame = capture_monitor(mon)
+            if frame is None:
+                frame = capture_monitor(mon)
+            if frame is None:
+                return
+            for k, it in enumerate(items):
+                if self.done:
+                    return
+                if not it.get("previewable"):
+                    continue
+                try:
+                    crop = crop_to_window(frame, mon, it["at"], it["size"])
+                    if crop is not None:
+                        save_pixbuf_cache(crop, it.get("address"))
+                    tex = round_tile(crop)
+                except Exception:
+                    tex = None
+                if tex is not None:
+                    GLib.idle_add(self.apply_preview, k, tex)
+                else:
+                    # Live crop failed (occluded mid-capture): try cache.
+                    try:
+                        pb = load_cached_pixbuf(it.get("address"))
+                        if pb is not None:
+                            tex2 = round_tile(pb)
+                            if tex2 is not None:
+                                GLib.idle_add(self.apply_preview, k, tex2)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    def on_activate(self, app):
+        win = Gtk.ApplicationWindow(application=app)
+        win.set_name("sw")
+        win.set_resizable(False)
+        win.set_decorated(False)
+        win.set_visible(True)
+
+        n = len(self.items)
+        width = min(6, n) * (CARD_W + BX) + MX * 2
+        win.set_default_size(width, ROW_H + MX * 2 + 8)
+
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
+                      spacing=BX, homogeneous=False)
+        for i, (it, tex) in enumerate(zip(self.items, self.tex)):
+            row.append(self.build_card(app, i, it, tex))
+            self.cards.append(row.get_last_child())
+
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.NEVER)
+        scroller.set_child(row)
+
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        outer.set_margin_top(MX)
+        outer.set_margin_bottom(MX)
+        outer.set_margin_start(MX)
+        outer.set_margin_end(MX)
+        outer.append(scroller)
+        win.set_child(outer)
+
+        kc = Gtk.EventControllerKey()
+        kc.connect("key-pressed", self.on_key)
+        # Physical Alt-release commit (Method A): the compositor-level
+        # release binds are a fallback, but a bare-modifier release bind can
+        # fail to fire once Tab was pressed while Alt was held. Listening to
+        # the native Wayland key-release here makes Alt-release commit
+        # reliable as long as the picker holds keyboard focus (it calls
+        # present() + grab_focus() on open). Binds use non_consuming so the
+        # release event still reaches us when they do fire (idempotent).
+        kc.connect("key-released", self.on_key_release)
+        win.add_controller(kc)
+        # Click-outside commit: when the picker loses keyboard focus (user
+        # clicked another surface), commit the highlighted card instead of
+        # leaving a stuck overlay. Guarded by self.done so teardown and the
+        # cancel path never re-enter activate().
+        win.connect("notify::is-active", self.on_active_changed)
+
+        css = Gtk.CssProvider()
+        css.load_from_string("""
+            #sw { background-color: rgba(15,15,19,0.94); border-radius: 18px; }
+            .item { background: rgba(34,35,46,0.85); border: 2px solid rgba(255,255,255,0.07);
+                    border-radius: 16px; box-shadow: none; outline: none; }
+            .item:focus-visible { outline: none; box-shadow: none; }
+            .item:hover { border-color: rgba(255,255,255,0.20); }
+            .sel { border-color: #7aa2f7; }
+            #preview { background-color: rgba(0,0,0,0.35); border-radius: 12px; }
+            #pname { color: #d8dee9; font-size: 14px; font-weight: 600; }
+            #ptag { color: #6b7089; font-size: 11px; }
+        """)
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(), css,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+        self.win = win
+        win.present()
+        self.select(self.idx)
+        GLib.idle_add(self.select, self.idx)
+        GLib.idle_add(self.scroll_to, self.idx)
+        with self.p_lock:
+            self.ready = True
+            pend = list(self.pending)
+            self.pending.clear()
+        for ln in pend:
+            GLib.idle_add(handle_cmd, ln, self)
+
+    def build_card(self, app, i, it, tex):
+        btn = Gtk.Button()
+        btn.add_css_class("item")
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+
+        prev = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        prev.set_name("preview")
+        prev.set_size_request(CARD_W, CARD_H)
+        pic = Gtk.Picture()
+        pic.set_paintable(tex if tex is not None else placeholder_tile(it))
+        pic.set_content_fit(Gtk.ContentFit.CONTAIN)
+        pic.set_size_request(CARD_W, CARD_H)
+        prev.append(pic)
+        self.pics.append(pic)
+        box.append(prev)
+
+        foot = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        icon_tex = load_app_icon(it["icon"], it["class"])
+        if icon_tex is not None:
+            ic = Gtk.Image.new_from_paintable(icon_tex)
+            ic.set_valign(Gtk.Align.CENTER)
+            foot.append(ic)
+        nm = Gtk.Label(label=it["name"])
+        nm.set_name("pname")
+        nm.set_ellipsize(True)
+        nm.set_max_width_chars(16)
+        nm.set_hexpand(True)
+        nm.set_xalign(0)
+        foot.append(nm)
+        if not it["on_view"]:
+            tg = Gtk.Label(label=f"ws {it['ws']}")
+            tg.set_name("ptag")
+            foot.append(tg)
+        box.append(foot)
+
+        btn.set_child(box)
+        btn.set_size_request(CARD_W + 8, ROW_H)
+        btn.connect("clicked", lambda b, i=i: self.activate(i))
+
+        motion = Gtk.EventControllerMotion()
+        motion.connect("enter", lambda m, x, y, i=i: self.select(i))
+        btn.add_controller(motion)
+        return btn
+
+    def on_key(self, ctrl, keyval, keycode, state):
+        if self.done:
+            return True
+        if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_space):
+            self.activate(self.idx)
+            return True
+        if keyval == Gdk.KEY_Escape:
+            self.cancel()
+            return True
+        if keyval in (Gdk.KEY_Right, Gdk.KEY_Down):
+            self.move(1)
+            return True
+        if keyval in (Gdk.KEY_Left, Gdk.KEY_Up):
+            self.move(-1)
+            return True
+        return False
+
+    def on_key_release(self, ctrl, keyval, keycode, state):
+        if self.done:
+            return True
+        if keyval in (Gdk.KEY_Alt_L, Gdk.KEY_Alt_R):
+            # Alt was being held for Alt+Tab cycling and is now released:
+            # commit the highlighted card (covers Alt / Alt+Shift states —
+            # the keyval is the same whichever mods were held).
+            self.activate(self.idx)
+            return True
+        return False
+
+    def on_active_changed(self, win, pspec):
+        if self.done:
+            return
+        try:
+            if not win.is_active():
+                self.activate(self.idx)
+        except Exception:
+            pass
+
+    def all_cards(self):
+        return list(self.cards)
+
+    def select(self, i, focus_card=True):
+        if self.done:
+            return
+        n = len(self.items)
+        if not n:
+            return
+        i = i % n
+        cards = self.all_cards()
+        changed = i != self.idx
+        self.idx = i
+        if changed:
+            for c in cards:
+                if c.has_css_class(SEL_CLASS):
+                    c.remove_css_class(SEL_CLASS)
+        card = cards[i]
+        if not card.has_css_class(SEL_CLASS):
+            card.add_css_class(SEL_CLASS)
+        if focus_card and card.get_focusable():
+            card.grab_focus()
+        GLib.idle_add(self.scroll_to, i)
+
+    def move(self, d):
+        if len(self.items) <= 1 or not self.cards:
+            return
+        self.select((self.idx + d) % len(self.items))
+
+    def scroll_to(self, i):
+        try:
+            scroller = self.win.get_child().get_first_child()
+            child = self.all_cards()[i]
+            adj = scroller.get_hadjustment()
+            ok, pt = child.compute_point(scroller, Gdk.Point(0, 0))
+            if not ok:
+                return False
+            w = child.get_current_allocated_size()[0]
+            page = adj.get_page_size()
+            if adj.get_value() > pt.x:
+                adj.set_value(max(0, pt.x - 6))
+            elif adj.get_value() + page < pt.x + w + BX:
+                adj.set_value(pt.x + w + BX - page)
+        except Exception:
+            pass
+        return False
+
+    def activate(self, i=None):
+        """Commit the selection: focus the exact client address, then quit.
+
+        The picker window itself holds focus while open, so we unmap it
+        FIRST (cancel) and dispatch focus AFTER — otherwise the compositor
+        can hand focus straight back to the overlay. Best-effort: the
+        picker always closes even if verification fails, so Alt-release
+        can never leave a stuck overlay behind.
+        """
+        if self.done:
+            return
+        if i is None:
+            i = self.idx
+        n = len(self.items)
+        if not n:
+            self.cancel()
+            return
+        i = i % n
+        order = list(range(n))
+        order.sort(key=lambda k: 0 if k == i else 1)
+        addrs = []
+        for k in order:
+            a = resolve_live(self.items[k])
+            if a and a not in addrs:
+                addrs.append(a)
+        self.done = True
+        self.cancel()
+        # Give the compositor a beat to unmap the overlay before focusing.
+        time.sleep(0.05)
+        for addr in addrs:
+            if focus_address(addr):
+                return
+        # Best-effort fallback: at least try the selected address once more
+        # without verification (covers slow-to-map / fullscreen targets).
+
+    def cancel(self):
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
+        # Disarm commit handlers (key-release, focus-out): a dismiss must
+        # never re-enter activate() while the window deactivates on teardown.
+        self.done = True
+        try:
+            if os.path.exists(SOCK):
+                os.unlink(SOCK)
+        except Exception:
+            pass
+        try:
+            if os.path.exists(PID):
+                os.unlink(PID)
+        except Exception:
+            pass
+        try:
+            self.app.quit()
+        except Exception:
+            pass
+
+
+def resolve_live(it):
+    """Re-query Hyprland for the live address of item it.
+
+    Prefers the EXACT address captured at open time (correct when several
+    windows share a class/workspace). Only if that address is gone do we
+    fall back to class+workspace, then class-only matching.
+    """
+    addr = it.get("address")
+    try:
+        clients = hyprctl_j("clients")
+    except Exception:
+        return addr
+    for w in clients:
+        if w.get("address") == addr and w.get("mapped"):
+            return addr
+    for w in clients:
+        if not w.get("mapped"):
+            continue
+        if w.get("class") != it.get("class"):
+            continue
+        if w.get("workspace", {}).get("id") != it.get("ws"):
+            continue
+        # Prefer same-title match when duplicates share class+workspace.
+        if it.get("title") and w.get("title") == it.get("title"):
+            return w.get("address")
+    for w in clients:
+        if not w.get("mapped"):
+            continue
+        if w.get("class") != it.get("class"):
+            continue
+        if w.get("workspace", {}).get("id") != it.get("ws"):
+            continue
+        return w.get("address")
+    return addr
+
+
+def serve(listener, sw):
+    """Socket control plane: 'move n', 'close'/'commit', 'cancel'.
+    Commands arriving before the window is realized are queued in sw.pending
+    and drained after present, so a fast Alt-release is never dropped."""
+    while True:
+        try:
+            conn, _ = listener.accept()
+        except socket.timeout:
+            if sw.done:
+                return
+            continue
+        except Exception:
+            return
+        try:
+            data = b""
+            while b"\n" not in data:
+                c = conn.recv(256)
+                if not c:
+                    break
+                data += c
+            line = data.decode("utf-8", "replace").strip()
+            with sw.p_lock:
+                if sw.ready:
+                    GLib.idle_add(handle_cmd, line, sw)
+                else:
+                    sw.pending.append(line)
+            conn.close()
+        except Exception:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def handle_cmd(line, sw):
+    if not line or sw is None:
+        return
+    if not sw.items:
+        return
+    parts = line.split()
+    if parts[0] == "move":
+        try:
+            d = int(parts[1]) if len(parts) > 1 else 1
+        except ValueError:
+            d = 1
+        sw.move(d)
+    elif parts[0] in ("close", "commit"):
+        # `close --focus` (bindrt) and `commit` are aliases: commit the
+        # current selection by exact client address.
+        GLib.timeout_add(PICKER_DWELL_MS,
+                         lambda: sw.activate(sw.idx) or False)
+    elif parts[0] == "cancel":
+        sw.cancel()
+    return False
+
+
+def gui_main(start=0):
+    existing = read_pid()
+    if alive(existing) and existing != os.getpid():
+        return 1
+    try:
+        os.makedirs(os.path.dirname(PID), exist_ok=True)
+        if os.path.exists(SOCK):
+            os.unlink(SOCK)
+        with open(PID, "w") as f:
+            f.write(str(os.getpid()))
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(SOCK)
+        listener.listen(4)
+        listener.settimeout(0.4)
+    except Exception:
+        _cleanup_quiet()
+        return 1
+
+    # Switcher + server start FIRST so a fast Alt-release during capture is
+    # queued (sw.pending) instead of dropped by a missing socket.
+    sw = Switcher([], [], start)
+    threading.Thread(target=serve, args=(listener, sw), daemon=True).start()
+
+    mon = pick_monitor()
+    items = window_items(mon)
+    if not items:
+        _cleanup_quiet()
+        return 0
+
+    # Open instantly with cached/icon tiles; live previews decode in the
+    # background (frame is captured before the window is presented, so no
+    # self-capture). Cached thumbnails make off-view windows instant too.
+    textures = [initial_texture(it) for it in items]
+    sw.items = items
+    sw.tex = textures
+    sw.idx = start % len(items)
+    threading.Thread(target=sw.load_previews, args=(mon, items), daemon=True).start()
+    sw.app.run()
+    return 0
+
+
+def _cleanup_quiet():
+    try:
+        if os.path.exists(SOCK):
+            os.unlink(SOCK)
+    except Exception:
+        pass
+    try:
+        if os.path.exists(PID):
+            os.unlink(PID)
+    except Exception:
+        pass
+
+
+# ------------------------------------------------------------ CLI / leaf ------
+def cmd_list(profile="apps"):
+    items = window_items()
+    out = []
+    for it in items:
+        out.append({
+            "address": it["address"],
+            "class": it["class"],
+            "name": it["name"],
+            "title": it["title"],
+            "fullscreen": it["fullscreen"],
+            "on_view": it["on_view"],
+            "ws": it["ws"],
+        })
+    print(json.dumps(out, indent=2))
+
+
+def cmd_open(args):
+    profile = "apps"
+    if args and args[0] == "--profile":
+        if len(args) > 1:
+            profile = args[1]
+        args = args[2:]
+    delta = 1 if "next" in args else -1 if "prev" in args else 0
+    pid = read_pid()
+    if alive(pid):
+        if delta:
+            if send_wait(f"move {'1' if delta > 0 else '-1'}\n"):
+                return 0
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except Exception:
+                pass
+            _cleanup_quiet()
+        return 0
+    script = os.path.realpath(sys.argv[0])
+    items = window_items()
+    sel = 0
+    if delta > 0 and len(items) > 1:
+        sel = 1
+    elif delta < 0 and len(items) > 1:
+        sel = len(items) - 1
+    try:
+        subprocess.Popen(
+            [sys.executable, script, "gui", str(sel), "--profile", profile],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True, close_fds=True)
+    except Exception:
+        pass
+    return 0
+
+
+def cmd_move(delta):
+    if not send_wait(f"move {delta}\n"):
+        return 1, "switcher not running"
+    return 0, "ok"
+
+
+def cmd_close(args=None):
+    # Accepts `close --focus` (bindrt release binds) — extra flags ignored.
+    if not send_wait("close\n"):
+        return 1, "switcher not running"
+    return 0, "ok"
+
+
+def cmd_cancel():
+    if not send_wait("cancel\n"):
+        return 1, "switcher not running"
+    return 0, "ok"
+
+
+# -------------------------------------------------- thumbnail daemon -----
+def socket2_path():
+    """Locate Hyprland's event socket ($XDG_RUNTIME_DIR/hypr/<sig>/.socket2.sock)."""
+    sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")
+    rt = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    if sig:
+        p = Path(rt) / "hypr" / sig / ".socket2.sock"
+        if p.exists():
+            return str(p)
+    try:
+        cands = sorted(Path(rt, "hypr").glob("*/.socket2.sock"),
+                       key=lambda p: p.stat().st_mtime, reverse=True)
+        if cands:
+            return str(cands[0])
+    except Exception:
+        pass
+    return None
+
+
+def cmd_daemon(foreground=False):
+    """Background thumbnail cache: grim-capture windows while last active.
+
+    Listens on Hyprland socket2 for `activewindow>>` focus events and
+    captures the newly focused window (now on top, fully rendered) via
+    `grim -g "<X,Y WxH>"` into /tmp/omarchy_previews/<address>.png.
+    This is what lets the switcher show real previews for inactive and
+    other-workspace windows that Wayland would otherwise leave blank.
+    Also prunes cache entries for closed windows.
+    """
+    sock = socket2_path()
+    if not sock:
+        print("hyprland socket2 not found", file=sys.stderr)
+        return 1
+    if not foreground:
+        # Detach: re-exec in background, single instance. Match only the
+        # --foreground worker so this launcher process itself is not counted.
+        try:
+            out = run(["pgrep", "-f", "omarchy-switch daemon --foreground"])
+            if out.strip():
+                return 0
+        except Exception:
+            pass
+        script = os.path.realpath(sys.argv[0])
+        subprocess.Popen(
+            [sys.executable, script, "daemon", "--foreground"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True, close_fds=True)
+        return 0
+    # --foreground: run the event loop (restart socket on disconnect).
+    last = active_addr()
+    # Seed cache for the currently active window.
+    if last:
+        threading.Thread(target=cache_window_shot,
+                         args=(last, 0.3), daemon=True).start()
+    while True:
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(30)
+            s.connect(sock)
+            buf = b""
+            while True:
+                try:
+                    chunk = s.recv(4096)
+                except socket.timeout:
+                    continue
+                if not chunk:
+                    break
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    try:
+                        ev = line.decode("utf-8", "replace").strip()
+                    except Exception:
+                        continue
+                    if ev.startswith("activewindowv2>>"):
+                        # Carries the focused client address as bare hex
+                        # (no 0x prefix); empty when nothing is focused.
+                        raw = ev.split(">>", 1)[1].strip().split(",")[0]
+                        if not raw:
+                            continue
+                        addr = raw if raw.startswith("0x") else "0x" + raw
+                        if addr and addr != last:
+                            last = addr
+                            # Small delay so the window is mapped on top.
+                            threading.Thread(
+                                target=cache_window_shot,
+                                args=(addr, 0.25), daemon=True).start()
+                    elif ev.startswith("activewindow>>"):
+                        # Legacy event: payload is "<class>,<title>", not an
+                        # address — resolve the live active window instead.
+                        cur = active_addr()
+                        if cur and cur != last:
+                            last = cur
+                            threading.Thread(
+                                target=cache_window_shot,
+                                args=(cur, 0.25), daemon=True).start()
+                    elif ev.startswith("closewindow>>"):
+                        raw = ev.split(">>", 1)[1].strip().split(",")[0]
+                        addr = raw if raw.startswith("0x") else "0x" + raw
+                        try:
+                            p = cache_file(addr)
+                            if p.is_file():
+                                p.unlink()
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+        time.sleep(2.0)
+
+
+def main():
+    args = sys.argv[1:]
+    if not args:
+        print("usage: omarchy-switch [open [next|prev] | move +-n | close [--focus] | commit | cancel | list | gui [start] | daemon [--foreground] | cache <address>]")
+        return 1
+    cmd = args.pop(0)
+
+    if cmd == "list":
+        cmd_list(args[0] if args else "apps")
+        return 0
+    if cmd == "open":
+        return cmd_open(args)
+    if cmd == "move":
+        try:
+            d = int(args[0]) if args else 1
+        except ValueError:
+            d = 1
+        rc, m = cmd_move(d)
+        if m:
+            print(m)
+        return rc
+    if cmd in ("close", "commit"):
+        rc, m = cmd_close(args)
+        if m:
+            print(m)
+        return rc
+    if cmd == "cancel":
+        rc, m = cmd_cancel()
+        if m:
+            print(m)
+        return rc
+    if cmd == "daemon":
+        fg = "--foreground" in args or "-f" in args
+        return cmd_daemon(foreground=fg)
+    if cmd == "cache":
+        if not args:
+            print("usage: omarchy-switch cache <address>", file=sys.stderr)
+            return 1
+        ok = cache_window_shot(args[0])
+        print("cached" if ok else "no cache (window not mapped?)")
+        return 0 if ok else 1
+    if cmd == "gui":
+        start = 0
+        if args and str(args[0]).lstrip("-").isdigit():
+            start = int(args.pop(0))
+        profile = "apps"
+        if args and args[0] == "--profile":
+            if len(args) > 1:
+                profile = args[1]
+        return gui_main(start)
+    print(f"unknown command: {cmd}")
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
