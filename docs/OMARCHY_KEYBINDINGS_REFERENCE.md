@@ -72,10 +72,15 @@ applications.
 
 ## APPLICATION SWITCHING (Alt + Tab)
 
+`Alt+Tab` / `Alt+Shift+Tab` open `omarchy-switch`: a borderless, floating GTK
+picker listing the current monitor's windows with their app icons above a
+snapshot of the current workspace. It stays up until Enter/click switches, Esc
+cancels; pressing the shortcut again (or swiping 4-finger) moves the selection.
+
 | Key | Action |
 |-----|--------|
-| **Alt + Tab** | Next window/application (visual switcher via mogtabctl) |
-| **Alt + Shift + Tab** | Previous window/application |
+| **Alt + Tab** | App picker → next window (`omarchy-switch open next`) |
+| **Alt + Shift + Tab** | App picker → previous window (`omarchy-switch open prev`) |
 
 ---
 
@@ -259,11 +264,30 @@ LAUNCHER                   → Super + Space
 ### Preserved (already standard or useful custom):
 - All workspace navigation (Super+1-9, Super+Tab)
 - All hardware/media keys (XF86)
-- Alt+Tab application switching (enhanced with mogtabctl)
+- Alt+Tab application switching (omarchy-switch app picker)
 - Mouse window management (Super+drag)
 - Scratchpad, grouping, tiling commands
 - Omarchy utility menus (clipboard, emoji, calculator, etc.)
 - tmux compatibility (prefix C-Space/C-b untouched)
+
+---
+
+## TOUCHPAD GESTURES
+
+Directional gestures are reversed in `hypr/input.lua` (loaded via
+`require("hypr.input")`): swipe up scrolls down, swipe left advances.
+
+| Gesture | Reversed behavior | Config |
+|---------|-------------------|--------|
+| 2-finger scroll | Both axes flipped | `input:touchpad:natural_scroll = true` |
+| 3-finger horizontal swipe | Swap workspace direction: swipe **left** opens the right (next) workspace | `gestures:workspace_swipe_invert = true` |
+| 4-finger left swipe | App picker → next | `omarchy-switch open next` |
+| 4-finger right swipe | App picker → previous | `omarchy-switch open prev` |
+
+Non-directional touchpad input (tap, clickfinger, pinch zoom) is untouched.
+Browser back/forward lives in the application, not the compositor: it follows
+the flipped horizontal scroll axis in most browsers, but Hyprland can't bind
+browser history directly.
 
 ---
 
