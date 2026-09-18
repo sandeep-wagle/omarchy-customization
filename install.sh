@@ -38,6 +38,8 @@ declare -a PAIRS=(
   "bin/mogtabctl|${HOME}/.local/bin/mogtabctl|apps"
   "bin/omarchy-switch|${HOME}/.local/bin/omarchy-switch|apps"
   "bin/omarchy-display-mode|${HOME}/.local/bin/omarchy-display-mode|apps"
+  "bin/omarchy-fullscreen-watch|${HOME}/.local/bin/omarchy-fullscreen-watch|apps"
+  "systemd/omarchy-crash-watch.service.d/override.conf|${HOME}/.config/systemd/user/omarchy-crash-watch.service.d/override.conf|apps"
   "bin/omarchy-window-snap|${HOME}/.local/bin/omarchy-window-snap|apps"
   "bin/omarchy-toggle-bar-mode|${HOME}/.local/bin/omarchy-toggle-bar-mode|apps"
   "toggles/single-window-aspect-ratio.lua|${HOME}/.local/state/omarchy/toggles/hypr/single-window-aspect-ratio.lua|apps"
@@ -194,7 +196,8 @@ apply() {
   done
   chmod +x "${HOME}/.local/bin/mogtab" "${HOME}/.local/bin/mogtabctl" \
     "${HOME}/.local/bin/omarchy-window-snap" "${HOME}/.local/bin/omarchy-toggle-bar-mode" \
-    "${HOME}/.local/bin/omarchy-switch" "${HOME}/.local/bin/omarchy-display-mode" 2>/dev/null || true
+    "${HOME}/.local/bin/omarchy-switch" "${HOME}/.local/bin/omarchy-display-mode" \
+    "${HOME}/.local/bin/omarchy-fullscreen-watch" 2>/dev/null || true
   if [ "$changed" -gt 0 ]; then
     info "Reloading Hyprland config..."
     hyprctl reload >/dev/null 2>&1 || true
@@ -202,6 +205,11 @@ apply() {
     if pgrep -f "mogtab run" >/dev/null 2>&1; then
       pkill -f "mogtab run" 2>/dev/null || true
       setsid "${HOME}/.local/bin/mogtab" run &>/dev/null &
+    fi
+    # pick up a changed crash-watch drop-in (ignore list) if present
+    if [ -f "${HOME}/.config/systemd/user/omarchy-crash-watch.service.d/override.conf" ]; then
+      systemctl --user daemon-reload >/dev/null 2>&1 || true
+      systemctl --user try-restart omarchy-crash-watch.service >/dev/null 2>&1 || true
     fi
   fi
   ok "Done. $changed file(s) installed."
