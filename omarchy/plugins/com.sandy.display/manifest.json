@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "com.sandy.display",
+  "name": "Display (extended)",
+  "version": "1.0.0",
+  "author": "Sandy",
+  "description": "Display controls with per-monitor refresh-rate selection and layout/presentation modes (extend, mirror, internal/external only)",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Display",
+    "description": "Display controls with refresh rate and layout modes",
+    "category": "System",
+    "allowMultiple": false
+  }
+}
