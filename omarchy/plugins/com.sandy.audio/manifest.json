@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "com.sandy.audio",
+  "name": "Audio (extended)",
+  "version": "1.0.0",
+  "author": "Sandy",
+  "description": "Audio controls listing all output sinks (unavailable ones dimmed but selectable), like the input section",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Audio",
+    "description": "Audio controls with full output device list",
+    "category": "System",
+    "allowMultiple": false
+  }
+}
