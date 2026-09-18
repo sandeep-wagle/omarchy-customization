@@ -1,0 +1,322 @@
+#!/usr/bin/env bash
+# omarchy-display-mode — refresh-rate and layout control for Hyprland monitors.
+#
+# Backs the Display panel (com.sandy.display): applies changes live via
+# `hyprctl eval "hl.monitor({...})"` and persists per-output rules to
+# ~/.config/hypr/monitors.lua so they survive reboots and lid events.
+#
+# Usage:
+#   omarchy-display-mode refresh <OUTPUT> <HZ>   # e.g. refresh eDP-1 144
+#   omarchy-display-mode resolution <OUTPUT> <WxH> # e.g. resolution HDMI-A-1 1280x720
+#   omarchy-display-mode scale <OUTPUT> <SCALE>   # e.g. scale HDMI-A-1 1.25
+#   omarchy-display-mode layout <MODE>           # extend-right|extend-left|
+#                                                # extend-above|extend-below|
+#                                                # mirror|internal-only|external-only
+#   omarchy-display-mode rates <OUTPUT>          # list "WxH@RRHz" modes for output
+#   omarchy-display-mode resolutions <OUTPUT>    # list "WxH (aspect)" modes for output
+#   omarchy-display-mode gpu                     # print integrated|hybrid|nvidia|dedicated|unknown
+#   omarchy-display-mode gpu-set <MODE>          # igpu|hybrid|dgpu (notifies if re-login needed)
+set -u
+
+MONITOR_LUA="${HOME}/.config/hypr/monitors.lua"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  omarchy-display-mode refresh <OUTPUT> <HZ>
+  omarchy-display-mode layout <extend-right|extend-left|extend-above|extend-below|mirror|internal-only|external-only>
+  omarchy-display-mode rates <OUTPUT>
+EOF
+}
+
+monitors_json() {
+  hyprctl monitors all -j 2>/dev/null
+}
+
+# Echo "<internal> <external>" (first non-internal output), like omarchy-monitor-state.
+internal_external() {
+  local j="$1"
+  local internal external
+  internal="$(echo "$j" | jq -r '[.[] | select(.name | test("^(eDP|LVDS|DSI)-"))][0].name // ""')"
+  external="$(echo "$j" | jq -r '[.[] | select((.name | test("^(eDP|LVDS|DSI)-")) | not)][0].name // ""')"
+  printf '%s %s\n' "$internal" "$external"
+}
+
+valid_name() {
+  [[ $1 =~ ^[A-Za-z0-9._-]+$ ]]
+}
+
+# Replace (or append) a per-output hl.monitor rule in monitors.lua.
+# The generic `output = ""` fallback line is left untouched.
+persist_rule() {
+  local output="$1" rule="$2"
+  [ -f "$MONITOR_LUA" ] || return 0
+  local esc
+  esc="$(printf '%s' "$output" | sed 's/[.[\*^$/]/\\&/g')"
+  if grep -Eq "^hl\.monitor\(\{ output = \"${esc}\"," "$MONITOR_LUA"; then
+    local tmp
+    tmp="$(mktemp)" || return 0
+    sed -E "s|^hl\\.monitor\\(\\{ output = \"${esc}\",.*|${rule}|" "$MONITOR_LUA" >"$tmp" \
+      && cat "$tmp" >"$MONITOR_LUA"
+    rm -f "$tmp"
+  else
+    printf '%s\n' "$rule" >>"$MONITOR_LUA"
+  fi
+}
+
+cmd_rates() {
+  local output="$1"
+  valid_name "$output" || { echo "Refusing unsafe monitor name" >&2; exit 1; }
+  monitors_json | jq -r --arg o "$output" \
+    '.[] | select(.name == $o) | .availableModes[]'
+}
+
+cmd_refresh() {
+  local output="$1" want_hz="$2"
+  valid_name "$output" || { echo "Refusing unsafe monitor name" >&2; exit 1; }
+  [[ $want_hz =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "HZ must be numeric" >&2; exit 1; }
+
+  local j info w h x y scale
+  j="$(monitors_json)"
+  info="$(echo "$j" | jq -e -c --arg o "$output" '.[] | select(.name == $o)')"
+  w="$(echo "$info" | jq -r '.width')"
+  h="$(echo "$info" | jq -r '.height')"
+  x="$(echo "$info" | jq -r '.x')"
+  y="$(echo "$info" | jq -r '.y')"
+  scale="$(echo "$info" | jq -r '.scale')"
+
+  # Pick the available mode for HZ:
+  #   1. same resolution, rounded refresh == HZ (exact step, e.g. 144);
+  #   2. any resolution with rounded refresh == HZ, largest area first
+  #      (this is what makes a guaranteed 60Hz baseline work on modes
+  #      like 1152x864 that only expose 75Hz — it drops to 1920x1080@60);
+  #   3. closest refresh overall (last resort for odd HZ values).
+  local mode
+  mode="$(echo "$info" | jq -r --argjson w "$w" --argjson h "$h" --argjson hz "$want_hz" '
+    def rounded: (.rr | tonumber + 0.5 | floor);
+    [.availableModes[] | capture("^(?<mw>[0-9]+)x(?<mh>[0-9]+)@(?<rr>[0-9.]+)Hz$")]
+    | (map(select((.mw | tonumber) == $w and (.mh | tonumber) == $h and rounded == ($hz | floor))) | min_by(.rr | tonumber)) as $same
+    | (map(select(rounded == ($hz | floor))) | max_by((.mw | tonumber) * (.mh | tonumber) * 1000000 - ((.rr | tonumber) - $hz | if . < 0 then -. else . end))) as $any
+    | (min_by((.rr | tonumber) - $hz | if . < 0 then -. else . end)) as $near
+    | ($same // $any // $near)
+    | "\(.mw)x\(.mh)@\(.rr)"')"
+  if [ -z "$mode" ] || [ "$mode" = "null" ]; then
+    echo "No ${w}x${h} mode near ${want_hz}Hz on ${output}" >&2
+    exit 1
+  fi
+
+  hyprctl eval "hl.monitor({ output = \"$output\", mode = \"$mode\", position = \"${x}x${y}\", scale = $scale })" >/dev/null
+  persist_rule "$output" "hl.monitor({ output = \"$output\", mode = \"$mode\", position = \"${x}x${y}\", scale = $scale })"
+  echo "ok $output $mode"
+}
+
+# Common aspect-ratio label for WxH (16:9, 16:10, 21:9, 32:9, 4:3, 5:4,
+# 3:2, 1:1); falls back to the reduced ratio (e.g. 43:18) when uncommon.
+aspect_of() {
+  local w="$1" h="$2"
+  awk -v w="$w" -v h="$h" '
+    function gcd(a, b, t) { while (b) { t = a % b; a = b; b = t } return a }
+    BEGIN {
+      g = gcd(w, h); rw = w / g; rh = h / g
+      if (rw == 16 && rh == 9) a = "16:9"
+      else if ((rw == 16 && rh == 10) || (rw == 8 && rh == 5)) a = "16:10"
+      else if (rw == 64 && rh == 27) a = "21:9"
+      else if (rw == 43 && rh == 18) a = "21:9"
+      else if (rw == 32 && rh == 9) a = "32:9"
+      else if (rw == 4 && rh == 3) a = "4:3"
+      else if (rw == 5 && rh == 4) a = "5:4"
+      else if (rw == 3 && rh == 2) a = "3:2"
+      else if (rw == 1 && rh == 1) a = "1:1"
+      else if (rw == 21 && rh == 9) a = "21:9"
+      else a = rw ":" rh
+      print a
+    }'
+}
+
+cmd_resolutions() {
+  local output="$1"
+  valid_name "$output" || { echo "Refusing unsafe monitor name" >&2; exit 1; }
+  local j info
+  j="$(monitors_json)"
+  info="$(echo "$j" | jq -e -c --arg o "$output" '.[] | select(.name == $o)')"
+  echo "$info" | jq -r '.availableModes[]' | sed -E 's/@[0-9.]+Hz$//' | sort -u -t x -k1,1nr -k2,2nr | while read -r res; do
+    w="${res%x*}"; h="${res#*x}"
+    printf '%s (%s)\n' "$res" "$(aspect_of "$w" "$h")"
+  done
+}
+
+cmd_resolution() {
+  local output="$1" res="$2"
+  valid_name "$output" || { echo "Refusing unsafe monitor name" >&2; exit 1; }
+  [[ $res =~ ^[0-9]+x[0-9]+$ ]] || { echo "Resolution must look like 1920x1080" >&2; exit 1; }
+
+  local j info w h cur_rr x y scale
+  j="$(monitors_json)"
+  info="$(echo "$j" | jq -e -c --arg o "$output" '.[] | select(.name == $o)')"
+  w="${res%x*}"; h="${res#*x}"
+  cur_rr="$(echo "$info" | jq -r '.refreshRate')"
+  x="$(echo "$info" | jq -r '.x')"
+  y="$(echo "$info" | jq -r '.y')"
+  scale="$(echo "$info" | jq -r '.scale')"
+
+  # Keep the refresh closest to the current one at the new resolution.
+  local mode
+  mode="$(echo "$info" | jq -r --arg r "$res" --argjson rr "$cur_rr" '
+    [.availableModes[] | select(startswith($r + "@")) | capture("@(?<v>[0-9.]+)Hz$") | .v]
+    | if length == 0 then empty
+      else (. | min_by((tonumber) - $rr | if . < 0 then -. else . end)) as $best
+      | "\($r)@\($best)" end')"
+  if [ -z "$mode" ] || [ "$mode" = "null" ]; then
+    echo "Resolution $res not available on $output" >&2
+    exit 1
+  fi
+
+  hyprctl eval "hl.monitor({ output = \"$output\", mode = \"$mode\", position = \"${x}x${y}\", scale = $scale })" >/dev/null
+  persist_rule "$output" "hl.monitor({ output = \"$output\", mode = \"$mode\", position = \"${x}x${y}\", scale = $scale })"
+  echo "ok $output $mode"
+}
+
+cmd_scale() {
+  local output="$1" new_scale="$2"
+  valid_name "$output" || { echo "Refusing unsafe monitor name" >&2; exit 1; }
+  [[ $new_scale =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "SCALE must be numeric" >&2; exit 1; }
+
+  local j info mode x y
+  j="$(monitors_json)"
+  info="$(echo "$j" | jq -e -c --arg o "$output" '.[] | select(.name == $o)')"
+  mode="$(echo "$info" | jq -r '"\(.width)x\(.height)@\(.refreshRate)"')"
+  x="$(echo "$info" | jq -r '.x')"
+  y="$(echo "$info" | jq -r '.y')"
+
+  hyprctl eval "hl.monitor({ output = \"$output\", mode = \"$mode\", position = \"${x}x${y}\", scale = $new_scale })" >/dev/null
+  persist_rule "$output" "hl.monitor({ output = \"$output\", mode = \"$mode\", position = \"${x}x${y}\", scale = $new_scale })"
+  echo "ok $output scale $new_scale"
+}
+
+cmd_layout() {
+  local mode="$1"
+  local j internal external
+  j="$(monitors_json)"
+  read -r internal external <<<"$(internal_external "$j")"
+  if [ -z "$internal" ] || [ -z "$external" ]; then
+    echo "Need internal + external outputs for layout mode (have: '$internal' '$external')" >&2
+    exit 1
+  fi
+  valid_name "$internal" && valid_name "$external" || { echo "Refusing unsafe monitor name" >&2; exit 1; }
+
+  local info mode_str scale pos_int pos_ext extra_ext
+  info_of() { echo "$j" | jq -e -c --arg o "$1" '.[] | select(.name == $o)'; }
+  local int_info ext_info
+  int_info="$(info_of "$internal")"
+  ext_info="$(info_of "$external")"
+
+  apply() { # output mode position scale [extra-fields...]
+    local o="$1" m="$2" p="$3" s="$4" extra="${5:-}"
+    if [ -n "$extra" ]; then
+      hyprctl eval "hl.monitor({ output = \"$o\", mode = \"$m\", position = \"$p\", scale = $s, $extra })" >/dev/null
+      persist_rule "$o" "hl.monitor({ output = \"$o\", mode = \"$m\", position = \"$p\", scale = $s, $extra })"
+    else
+      hyprctl eval "hl.monitor({ output = \"$o\", mode = \"$m\", position = \"$p\", scale = $s })" >/dev/null
+      persist_rule "$o" "hl.monitor({ output = \"$o\", mode = \"$m\", position = \"$p\", scale = $s })"
+    fi
+  }
+
+  int_mode="$(echo "$int_info" | jq -r '"\(.width)x\(.height)@\(.refreshRate)"')"
+  int_scale="$(echo "$int_info" | jq -r '.scale')"
+  ext_mode="$(echo "$ext_info" | jq -r '"\(.width)x\(.height)@\(.refreshRate)"')"
+  ext_scale="$(echo "$ext_info" | jq -r '.scale')"
+
+  case "$mode" in
+    extend-right) pos_int="0x0"; pos_ext="auto-right"; extra_ext="" ;;
+    extend-left) pos_int="auto-right"; pos_ext="0x0"; extra_ext="" ;;
+    extend-above) pos_int="auto-down"; pos_ext="0x0"; extra_ext="" ;;
+    extend-below) pos_int="0x0"; pos_ext="auto-down"; extra_ext="" ;;
+    mirror) pos_int="0x0"; pos_ext="0x0"; extra_ext="mirror = \"$internal\"" ;;
+    internal-only)
+      apply "$internal" "$int_mode" "0x0" "$int_scale"
+      hyprctl eval "hl.monitor({ output = \"$external\", disabled = true })" >/dev/null
+      persist_rule "$external" "hl.monitor({ output = \"$external\", disabled = true })"
+      echo "ok internal-only"; return 0 ;;
+    external-only)
+      apply "$external" "$ext_mode" "0x0" "$ext_scale"
+      hyprctl eval "hl.monitor({ output = \"$internal\", disabled = true })" >/dev/null
+      persist_rule "$internal" "hl.monitor({ output = \"$internal\", disabled = true })"
+      echo "ok external-only"; return 0 ;;
+    *) echo "Unknown layout: $mode" >&2; usage >&2; exit 1 ;;
+  esac
+
+  # Re-enabling (a side may be disabled): a full rule replaces the
+  # `disabled = true` line, which re-enables the output.
+  apply "$internal" "$int_mode" "$pos_int" "$int_scale"
+  apply "$external" "$ext_mode" "$pos_ext" "$ext_scale" "$extra_ext"
+  echo "ok $mode"
+}
+
+# ---- GPU mode (supergfxctl preferred, envycontrol fallback) ----
+# Prints one of: integrated | hybrid | nvidia | dedicated | vfio | egpu | unknown
+cmd_gpu() {
+  if command -v supergfxctl >/dev/null 2>&1; then
+    local g
+    g="$(timeout 3 supergfxctl -g 2>/dev/null)" || g=""
+    # Normalize: [Integrated], Hybrid, etc. -> lowercase bare word.
+    g="$(printf '%s' "$g" | tr '[:upper:]' '[:lower:]' | tr -d '[] ')"
+    case "$g" in
+      integrated | hybrid | dedicated | nvidia | vfio | egpu | compute | none) printf '%s\n' "$g" ;;
+      "") printf 'unknown\n' ;;
+      *) printf '%s\n' "$g" ;;
+    esac
+    return 0
+  fi
+  if command -v envycontrol >/dev/null 2>&1; then
+    timeout 5 envycontrol --query 2>/dev/null || printf 'unknown\n'
+    return 0
+  fi
+  printf 'unknown\n'
+}
+
+# Switch GPU mode: igpu | hybrid | dgpu. Prints the resulting mode (or an
+# explanatory line) and notifies when a re-login/reboot is required.
+cmd_gpu_set() {
+  local want="$1" target sgfx_target
+  case "$want" in
+    igpu | integrated) target="integrated"; sgfx_target="Integrated" ;;
+    hybrid) target="hybrid"; sgfx_target="Hybrid" ;;
+    dgpu | dedicated | nvidia) target="nvidia"; sgfx_target="Dedicated" ;;
+    *) echo "MODE must be igpu|hybrid|dgpu" >&2; exit 1 ;;
+  esac
+
+  if command -v supergfxctl >/dev/null 2>&1; then
+    if timeout 10 pkexec supergfxctl -m "$sgfx_target" 2>/dev/null \
+       || timeout 10 supergfxctl -m "$sgfx_target" 2>/dev/null; then
+      notify-send "GPU Mode" "Switched to ${want}. Please re-login to apply changes." 2>/dev/null || true
+      cmd_gpu
+      return 0
+    fi
+    echo "supergfxctl switch failed (is supergfxd running?)" >&2
+    exit 1
+  fi
+  if command -v envycontrol >/dev/null 2>&1; then
+    if timeout 30 pkexec envycontrol -s "$target" 2>/dev/null; then
+      notify-send "GPU Mode" "Switched to ${want}. Please reboot to apply changes." 2>/dev/null || true
+      cmd_gpu
+      return 0
+    fi
+    echo "envycontrol switch failed" >&2
+    exit 1
+  fi
+  notify-send "GPU Mode" "Install supergfxctl or envycontrol to switch GPU modes." 2>/dev/null || true
+  echo "no GPU backend (install supergfxctl or envycontrol)" >&2
+  exit 1
+}
+
+case "${1:-}" in
+  refresh) [ $# -eq 3 ] || { usage >&2; exit 1; }; cmd_refresh "$2" "$3" ;;
+  resolution) [ $# -eq 3 ] || { usage >&2; exit 1; }; cmd_resolution "$2" "$3" ;;
+  scale) [ $# -eq 3 ] || { usage >&2; exit 1; }; cmd_scale "$2" "$3" ;;
+  layout) [ $# -eq 2 ] || { usage >&2; exit 1; }; cmd_layout "$2" ;;
+  rates) [ $# -eq 2 ] || { usage >&2; exit 1; }; cmd_rates "$2" ;;
+  resolutions) [ $# -eq 2 ] || { usage >&2; exit 1; }; cmd_resolutions "$2" ;;
+  gpu) cmd_gpu ;;
+  gpu-set) [ $# -eq 2 ] || { usage >&2; exit 1; }; cmd_gpu_set "$2" ;;
+  *) usage >&2; exit 1 ;;
+esac
