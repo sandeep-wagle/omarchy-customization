@@ -45,10 +45,10 @@
           "id": "omarchy.network"
         },
         {
-          "id": "omarchy.audio"
+          "id": "com.sandy.audio"
         },
         {
-          "id": "omarchy.monitor"
+          "id": "com.sandy.display"
         },
         {
           "id": "omarchy.power"

@@ -218,11 +218,16 @@ BarWidget {
         readonly property string appClass: toplevel && toplevel.lastIpcObject
           ? String(toplevel.lastIpcObject.class || "") : ""
         readonly property string address: toplevel ? String(toplevel.address || "") : ""
+        // The omarchy-switch overlay is a real focused-workspace client, but it
+        // is a transient picker and must never appear in the bar. Filtering it
+        // to `valid = false` renders a zero-width item that consumes no layout
+        // space (same treatment as an invalid entry), so no chip appears.
+        readonly property bool isSwitcher: appClass === "omarchy.switch"
         // Every model entry is a real client, so a window renders (icon at
         // minimum) as soon as it has a usable address. A title is only needed
         // for the ACTIVE item's label, never for showing the icon — this keeps
         // all windows (active or not) visible in the bar.
-        readonly property bool valid: address !== ""
+        readonly property bool valid: address !== "" && !isSwitcher
         // `hidden` in this model means "intentionally minimized", NOT "on
         // another workspace": the model only ever lists the focused workspace,
         // so a listed window is either visible or minimized.
