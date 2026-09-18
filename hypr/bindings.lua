@@ -48,6 +48,9 @@ hl.unbind("SUPER + DOWN")
 -- Super+Shift+B for browser -> will replace with Super+B and Super+Shift+B for private
 hl.unbind("SUPER + SHIFT + B")
 
+-- Super+P was "Pseudo window" in Omarchy defaults -> opens the Display panel
+hl.unbind("SUPER + P")
+
 -- Super+Ctrl+Left/Right for group focus -> replace with focus navigation
 hl.unbind("SUPER + CTRL + LEFT")
 hl.unbind("SUPER + CTRL + RIGHT")
@@ -133,6 +136,11 @@ o.bind("ALT + ALT_L", "Close app switcher (alt held)", "omarchy-switch close --f
 o.bind("ALT + ALT_R", "Close app switcher (alt held)", "omarchy-switch close --focus", _sw_close)
 o.bind("ALT + SHIFT + ALT_L", "Close app switcher (alt+shift held)", "omarchy-switch close --focus", _sw_close)
 o.bind("ALT + SHIFT + ALT_R", "Close app switcher (alt+shift held)", "omarchy-switch close --focus", _sw_close)
+
+-- ============================================================
+-- DISPLAY PANEL (Super+P, replaces default Pseudo window)
+-- ============================================================
+o.bind("SUPER + P", "Display panel", "omarchy-shell shell toggle com.sandy.display")
 
 -- ============================================================
 -- SECURITY
