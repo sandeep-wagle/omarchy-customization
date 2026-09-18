@@ -86,7 +86,7 @@ clipboard) is **removed** — apps and terminals keep their native Ctrl+* keys.
 | Taskbar widget | `omarchy/plugins/com.sandy.taskbar` | Windows/Ubuntu-style taskbar in the top bar: every open window on the current workspace with its **real app icon**, click to focus, middle/right to close, bounded width |
 | Top bar with auto-hide | `omarchy/plugins/bar-auto-hide` | Omarchy status bar that shows system widgets + the taskbar; auto-hides when idle, toggled with `Super+Shift+Space`, mode persists across login |
 | Snap preview | `omarchy/plugins/snap-preview` | Highlights the destination zone while dragging a floating window to an edge/corner |
-| App & workspace switcher | `mogtab/`, `bin/mogtab`, `bin/mogtabctl` | Visual `Alt+Tab` (applications) and `Super+Tab` (workspaces), per current monitor |
+| App & workspace switcher | `bin/omarchy-switch`, `mogtab/`, `bin/mogtab`, `bin/mogtabctl` | Visual `Alt+Tab` (horizontal card picker with live per-window previews + app icons) and `Super+Tab` (workspaces), per current monitor; hover/`←→` selects, Enter/click/Alt-release activates |
 | Native drag-to-snap | `hypr/looknfeel.lua` | Drag a floating window to a monitor edge/corner to snap half/quarter |
 | Standards-oriented keybindings | `hypr/bindings.lua` | Super+L lock, Super+E files, Super+B browser, Ctrl+Alt+T terminal, Alt+F4 close, Print fullscreen screenshot, and more (see reference) |
 | Installer with safe backups | `install.sh` | Backs up every changed file, then installs; one-command revert |
@@ -143,7 +143,8 @@ stock Omarchy default that this project keeps or relies on.
 
 | Action | Shortcut | Source |
 |---|---|---|
-| Next/prev window (visual switcher) | `Alt + Tab` · `Alt + Shift + Tab` | mogtab (current monitor) |
+| Next/prev window (visual switcher) | `Alt + Tab` · `Alt + Shift + Tab` (open/advance) | `bin/omarchy-switch` (current monitor) |
+| Confirm & close visual switcher | `Enter`, click, or releasing `Alt` | `bin/omarchy-switch` |
 | Next/prev monitor | `Ctrl + Alt + Tab` · `Ctrl + Alt + Shift + Tab` | Omarchy |
 
 ### System & security
@@ -253,6 +254,19 @@ project enables and respects it, it does not reimplement it.
 - **Middle / right-click** → graceful close request; the window stays alive
   until the application agrees.
 
+The visual app picker (`bin/omarchy-switch`, open with `Alt+Tab` or a 4-finger
+swipe) shows the current monitor's windows as **cards**: a live window preview on
+top, then the real app logo and name below. It stays up until Enter, click or
+releasing Alt (switch), Esc (cancel); more `Alt+Tab` presses / swipes move the
+selection. Previews are captured at the monitor's physical resolution (HiDPI
+`logical × scale`) and container-fit into each 220×120 card, so they never
+squish; the capture runs on a worker thread so the grid opens instantly and the
+`popin` window animation makes it appear smoothly. Opening the picker while a
+fullscreen app is focused works, and confirming a window that was fullscreen
+puts it back into fullscreen (Hyprland restores the state on focus). The preview
+is a snapshot of what is visible because Hyprland only exposes the visible frame
+buffer — there is no native way to show live thumbnails of other workspaces.
+
 For accuracy: the taskbar lists the windows of the **current workspace** (the
 compositor's `focusedWorkspace` model). A window elsewhere on the desktop still
 exists — it just isn't offered as a chip on this workspace. Closing/minimizing/
@@ -304,25 +318,33 @@ The mode persists across login via a state flag under
 git clone https://github.com/sandeep-wagle/omarchy-customization.git
 cd omarchy-customization
 
-./install.sh        # dry run: prints exactly what would change
-./install.sh --apply
+./install.sh            # ↑/↓ menu: pick a feature type to install
+./install.sh --apply    # install everything
 omarchy-restart-shell   # reload the Quickshell bar plugins
 ```
 
-`--apply` copies every file from the repo to its real destination, taking a
-fresh timestamped backup of anything it overwrites first:
+Running `./install.sh` opens an interactive feature picker (fzf, with a
+whiptail fallback) — arrow keys to navigate, Enter to install just that
+feature. The feature types are listed by `./install.sh --list`:
 
-- `hypr/*.lua`, `hypr/hyprland.conf` → `~/.config/hypr/`
-- `omarchy/shell.json`, `omarchy/shell.toml`, `omarchy/plugins/*` → `~/.config/omarchy/`
-- `bin/*` → `~/.local/bin/` (made executable)
-- `mogtab/config.toml` → `~/.config/mogtab/`
-- `toggles/*` → `~/.local/state/omarchy/toggles/`
-- then `hyprctl reload` and a `mogtab` restart (if running).
+- `window` — `hypr/*.lua`, `hypr/hyprland.conf` → `~/.config/hypr/`
+- `touchpad` — `hypr/input.lua` → `~/.config/hypr/` (**reversed touchpad gestures**)
+- `shell` — `omarchy/shell.json`, `omarchy/shell.toml`, `omarchy/plugins/*` → `~/.config/omarchy/`
+- `apps` — `bin/*` → `~/.local/bin/` (made executable), `mogtab/config.toml`, `toggles/*`
+- `docs` — keybinding reference → `~/OMARCHY_KEYBINDINGS_REFERENCE.md`
+- `everything` — all of the above (`./install.sh --apply` is the short form)
+
+Any file that differs from the repo is first backed up to a fresh timestamped
+directory, then overwritten; a changed install ends with `hyprctl reload` and a
+`mogtab` restart (if running).
 
 ### Verify
 - The top bar shows the taskbar in its left section.
 - `Super+Up` maximizes the focused window; `Super+Left` swaps it.
-- `Alt+Tab` cycles applications; `Super+PrtSc` captures the screen.
+- `Alt+Tab` opens the app picker (live-preview cards with logo + name);
+  Enter, click or releasing `Alt` switches, Esc cancels.
+- Touchpad gestures are reversed: 2-finger scroll, the 3-finger workspace swipe,
+  and the 4-finger app picker (swipe left/right to move the selection).
 
 ### Revert
 ```sh
@@ -345,10 +367,12 @@ deleted during install.
 | Auto-hide top bar + persistent mode toggle | Stable |
 | Snap preview while dragging to an edge/corner | Stable |
 | Native drag-to-snap (Hyprland `general:snap`) | Stable |
-| Visual `Alt+Tab` / `Super+Tab` (mogtab, current-monitor scope) | Stable |
+| Visual `Alt+Tab` app picker (`bin/omarchy-switch`: icons + workspace snapshot, Enter/click/Esc, current-monitor scope) | Working — built and live-wired to `Alt+Tab` and the 4-finger swipe |
+| Visual `Super+Tab` workspace switcher (mogtab, current-monitor scope) | Stable |
 | Dynamic dwindle tiling (2/3/4-window arrangements) | Working — provided by Hyprland's dwindle engine |
 | Multi-monitor move (`Super+Shift+↑/↓`) and monitor-scoped switching | Working — implemented; needs real multi-monitor hardware to field-test |
 | Single-window aspect-ratio toggle | Working — enabled via `toggles/` state file; overrides the flush (single window fills by default) |
+| Reversed touchpad gestures (scroll, workspace swipe, app picker) | Working — the directional flip is compositor-native; browser back/forward lives in the app and isn't controlled by Hyprland (it follows the flipped horizontal scroll axis in most browsers) |
 | Flatpak app icons (`.desktop` under flatpak export dirs) | Working — implemented in the resolver; not yet field-tested on a machine with flatpaks |
 | Bottom dock | Not included — the taskbar lives in the top bar |
 
