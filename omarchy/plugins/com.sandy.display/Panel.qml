@@ -37,10 +37,11 @@ Panel {
   // the display list lands (whichever proc finishes first wins).
   property string monitorsJsonCache: ""
 
-  // Explicit configuration target. Defaults to the focused monitor on open
-  // and follows compositor focus until the user clicks a DISPLAYS row, after
-  // which clicks (not focus) own it. SCALE / RESOLUTION / REFRESH RATE all
-  // apply to this output.
+  // Explicit configuration target. Set once from compositor focus when
+  // the panel opens, then owned ONLY by DISPLAYS clicks afterwards.
+  // (Following live focus made the whole panel retarget whenever the
+  // mouse crossed monitors — the "settings keep changing" feeling.
+  // Focus is still shown per-row via the "· focused" tag.)
   property string selectedMonitor: ""
   property bool selectedManual: false
   // Resolution under edit for the selected monitor ("WxH"); reset to the
@@ -554,11 +555,17 @@ Panel {
   // the cursor until hover or the first navigation key.
   onOpenedChanged: {
     if (opened) {
-      // Fresh target every open: follow compositor focus until the user
-      // clicks a DISPLAYS row.
+      // Fresh target every open: snapshot compositor focus once. Further
+      // focus changes (mouse crossing monitors) must NOT retarget.
       selectedManual = false
       selectedResolution = ""
-      selectedMonitor = focusedMonitor
+      selectedMonitor = ""
+      if (focusedMonitor !== "") {
+        selectedMonitor = focusedMonitor
+        var sel = selectedDisplay()
+        if (sel && sel.width > 0 && sel.height > 0)
+          selectedResolution = sel.width + "x" + sel.height
+      }
       refresh()
       if (brightnessAvailable) {
         focusSection = "brightness"
@@ -572,8 +579,10 @@ Panel {
   }
 
   onFocusedMonitorChanged: {
-    // Follow compositor focus only until an explicit click owns the target.
-    if (!selectedManual && focusedMonitor !== "") {
+    // One-time adoption only: fill an empty target (first data after open).
+    // Never override afterwards — neither an explicit click nor the
+    // open-time snapshot may be stolen by mouse-focus movement.
+    if (selectedMonitor === "" && focusedMonitor !== "") {
       selectedMonitor = focusedMonitor
       var sel = selectedDisplay()
       selectedResolution = (sel && sel.width > 0 && sel.height > 0)

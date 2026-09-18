@@ -18,3 +18,16 @@ o.window({ class = "^omarchy\\.switch$" }, {
   move = { "(monitor_w-window_w)/2", "(monitor_h-window_h)*0.35" },
   animation = "popin 90%",
 })
+
+-- Android Emulator / QEMU: the emulator is really two windows (the phone
+-- screen plus a separate side toolbar), so it must float FREELY — no
+-- workspace assignment, no rigid size (both trap input or clip the toolbar
+-- on multi-monitor setups). Plain floating utility, decorations stripped
+-- (Xwayland skin ghosting), normal focus passing everywhere.
+o.window({ class = "^([Ee]mulator|qemu-system-x86_64)$" }, {
+  float = true,
+  no_blur = true,
+  no_shadow = true,
+  border_size = 0,
+  no_initial_focus = true,
+})

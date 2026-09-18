@@ -1,0 +1,212 @@
+#!/usr/bin/env python3
+"""omarchy-fullscreen-watch — heal Hyprland's maximize-to-fullscreen trap.
+
+Upstream issue: a window maximized via `fullscreen, 1` (fs: 1) that requests
+client fullscreen (YouTube 'f', browser F11) can be dropped back to `fs: 0`
+tiled while the app believes it is fullscreen (`.fullscreenClient == 2`).
+
+This daemon listens on Hyprland's socket2 for `fullscreen>>` events and:
+  - trap   (client == 2 but fs == 0): re-dispatch true fullscreen
+           (`fullscreen_state internal = 2`), remembering the pre-trap state;
+  - exit   (client == 0 after we elevated): restore maximize (`internal = 1`)
+           iff the window was maximized before the video.
+
+Own dispatches re-trigger events but converge: after elevation fs != 0
+(no-op), after restore the address is forgotten (no-op). Never raises;
+all activity is logged to ~/.local/state/omarchy/fullscreen-watch.log.
+"""
+
+import json
+import os
+import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HOME = os.path.expanduser("~")
+LOG = Path(HOME) / ".local" / "state" / "omarchy" / "fullscreen-watch.log"
+PIDFILE = Path(HOME) / ".local" / "state" / "omarchy" / "fullscreen-watch.pid"
+
+# Debounce: after any elevation/restoration dispatch, ignore further triggers
+# briefly so Hyprland can complete the surface transition. Without this,
+# rapid 'f' taps (or our own dispatches echoing as events) race the
+# compositor and the window flickers between tiled and maximized.
+COOLDOWN_S = 0.3
+_cooldown_until = 0.0
+
+
+def log(msg):
+    try:
+        LOG.parent.mkdir(parents=True, exist_ok=True)
+        if LOG.is_file() and LOG.stat().st_size > 200 * 1024:
+            LOG.unlink()
+        with open(LOG, "a") as f:
+            f.write(f"{time.strftime('%F %T')} {msg}\n")
+    except Exception:
+        pass
+
+
+def run(cmd, timeout=12):
+    try:
+        return subprocess.run(cmd, capture_output=True, timeout=timeout).stdout.decode("utf-8", "replace")
+    except Exception:
+        return ""
+
+
+def hyprctl_j(args):
+    try:
+        return json.loads(run(["hyprctl", "-j"] + args).strip() or "null")
+    except Exception:
+        return None
+
+
+def dispatch_focus_state(internal):
+    """Set fullscreen state via Hyprland-Lua (classic `fullscreen` dispatcher
+    is not available on Hyprland-Lua builds)."""
+    run(["hyprctl", "dispatch",
+         f"hl.dsp.window.fullscreen_state({{ internal = {internal}, client = 0 }})"])
+
+
+def socket2_path():
+    sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")
+    rt = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    if sig:
+        p = Path(rt) / "hypr" / sig / ".socket2.sock"
+        if p.exists():
+            return str(p)
+    try:
+        cands = sorted(Path(rt, "hypr").glob("*/.socket2.sock"),
+                       key=lambda p: p.stat().st_mtime, reverse=True)
+        if cands:
+            return str(cands[0])
+    except Exception:
+        pass
+    return None
+
+
+def norm_addr(raw):
+    raw = (raw or "").strip().split(",")[0]
+    if not raw:
+        return ""
+    return raw if raw.startswith("0x") else "0x" + raw
+
+
+def single_instance():
+    """Pidfile guard with liveness check. pgrep self-matching is unreliable
+    here (timeout/setsid/bash wrappers contain our own command line under a
+    different pid), so trust only a live pid recorded by a previous owner."""
+    try:
+        PIDFILE.parent.mkdir(parents=True, exist_ok=True)
+        if PIDFILE.is_file():
+            try:
+                old = int(PIDFILE.read_text().strip())
+            except ValueError:
+                old = 0
+            if old and old != os.getpid():
+                try:
+                    os.kill(old, 0)
+                    return False  # previous owner alive
+                except (ProcessLookupError, PermissionError):
+                    pass  # stale pidfile; take over below
+        PIDFILE.write_text(str(os.getpid()))
+    except Exception:
+        pass
+    return True
+
+
+def active_window():
+    w = hyprctl_j(["activewindow"])
+    return w if isinstance(w, dict) and w.get("address") else None
+
+
+def main():
+    if not single_instance():
+        print("fullscreen-watch already running")
+        return 0
+    log("started")
+    last_fs = {}    # addr -> last seen .fullscreen
+    elevated = {}   # addr -> pre-trap .fullscreen (restore target on exit)
+
+    while True:
+        sock = socket2_path()
+        if not sock:
+            log("no socket2; retrying")
+            time.sleep(5)
+            continue
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(30)
+            s.connect(sock)
+            buf = b""
+            while True:
+                try:
+                    chunk = s.recv(4096)
+                except socket.timeout:
+                    continue
+                if not chunk:
+                    break
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    try:
+                        ev = line.decode("utf-8", "replace").strip()
+                    except Exception:
+                        continue
+                    if ev.startswith("closewindow>>"):
+                        addr = norm_addr(ev.split(">>", 1)[1])
+                        last_fs.pop(addr, None)
+                        elevated.pop(addr, None)
+                    elif ev.startswith("fullscreen>>"):
+                        handle_fullscreen(last_fs, elevated)
+        except Exception as e:
+            log(f"socket loop: {e!r}")
+        time.sleep(2.0)
+
+
+def handle_fullscreen(last_fs, elevated):
+    global _cooldown_until
+    time.sleep(0.2)  # let the compositor settle into its final state
+    w = active_window()
+    if not w:
+        return
+    addr = w.get("address")
+    try:
+        fs = int(w.get("fullscreen", 0) or 0)
+        client = int(w.get("fullscreenClient", 0) or 0)
+    except Exception:
+        return
+
+    now = time.monotonic()
+    if now < _cooldown_until:
+        # Inside the post-dispatch settle window: track state but take no
+        # action, so rapid key spam can't re-trigger mid-transition.
+        last_fs[addr] = fs
+        return
+
+    if fs == 0 and client == 2:
+        # TRAP: app believes it is fullscreen, compositor left it tiled.
+        prev = last_fs.get(addr, 0)
+        log(f"trap {addr} (prev fs={prev}); elevating")
+        dispatch_focus_state(2)
+        _cooldown_until = time.monotonic() + COOLDOWN_S
+        elevated[addr] = prev
+        last_fs[addr] = 0
+        return
+
+    if client == 0 and addr in elevated:
+        target = elevated.pop(addr)
+        if target == 1:
+            log(f"exit {addr}; restoring maximize")
+            dispatch_focus_state(1)
+            _cooldown_until = time.monotonic() + COOLDOWN_S
+        else:
+            log(f"exit {addr}; no restore (prev fs={target})")
+        last_fs[addr] = fs
+        return
+
+    last_fs[addr] = fs
+
+
+if __name__ == "__main__":
+    sys.exit(main())

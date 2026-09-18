@@ -4,3 +4,6 @@ o.launch_on_start("mogtab run")
 -- background so Alt-Tab cards show real previews for inactive /
 -- other-workspace windows (single-instance, self-detaches).
 o.launch_on_start("omarchy-switch daemon")
+-- Fullscreen trap healer: re-elevates client fullscreen dropped to tiling
+-- (maximized + video 'f'), restores maximize on video exit. Single instance.
+o.launch_on_start("omarchy-fullscreen-watch")
