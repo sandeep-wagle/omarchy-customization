@@ -52,6 +52,10 @@ hl.unbind("SUPER + SHIFT + B")
 hl.unbind("SUPER + CTRL + LEFT")
 hl.unbind("SUPER + CTRL + RIGHT")
 
+-- Alt+Tab / Alt+Shift+Tab -> the omarchy-switch picker (open next/prev)
+hl.unbind("ALT + TAB")
+hl.unbind("ALT + SHIFT + TAB")
+
 -- ============================================================
 -- STANDARD WINDOW MANAGEMENT (Super-based hierarchy)
 -- ============================================================
@@ -108,7 +112,27 @@ o.bind("SUPER + SHIFT + DOWN", "Move window to monitor down", hl.dsp.window.move
 -- ============================================================
 -- APPLICATION SWITCHING (Alt+Tab)
 -- ============================================================
--- Already handled: Alt+Tab, Alt+Shift+Tab (user config uses mogtabctl)
+-- Alt+Tab / Alt+Shift+Tab open the same omarchy-switch picker as the
+-- 4-finger swipe. First press opens it (selection follows Alt+Tab direction);
+-- pressing again moves the selection. Enter/click confirms, Esc cancels, and
+-- releasing Alt confirms the highlighted app and closes the picker.
+o.bind("ALT + TAB", "App switcher (next)", "omarchy-switch open next")
+o.bind("ALT + SHIFT + TAB", "App switcher (previous)", "omarchy-switch open prev")
+-- Releasing Alt commits the highlighted card (`close --focus`, alias `commit`).
+-- The picker's own Wayland key-release listener is the primary commit path;
+-- these compositor release binds are the fallback (e.g. Alt released before
+-- the picker mapped, or picker not focused). Bare-modifier release binds can
+-- fail to fire once Tab was pressed while Alt was held, so register every
+-- modifier state explicitly. non_consuming lets the release event still reach
+-- the focused picker (commit is idempotent); transparent keeps the binds
+-- unshadowable. Equivalent to classic `bindrt = ALT, Alt_L, exec, ...`.
+local _sw_close = { release = true, non_consuming = true, transparent = true }
+o.bind("ALT_L", "Close app switcher", "omarchy-switch close --focus", _sw_close)
+o.bind("ALT_R", "Close app switcher", "omarchy-switch close --focus", _sw_close)
+o.bind("ALT + ALT_L", "Close app switcher (alt held)", "omarchy-switch close --focus", _sw_close)
+o.bind("ALT + ALT_R", "Close app switcher (alt held)", "omarchy-switch close --focus", _sw_close)
+o.bind("ALT + SHIFT + ALT_L", "Close app switcher (alt+shift held)", "omarchy-switch close --focus", _sw_close)
+o.bind("ALT + SHIFT + ALT_R", "Close app switcher (alt+shift held)", "omarchy-switch close --focus", _sw_close)
 
 -- ============================================================
 -- SECURITY
