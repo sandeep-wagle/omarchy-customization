@@ -6,7 +6,7 @@
 # phone display doesn't fill its window. `QT_STYLE_OVERRIDE=Fusion` is the
 # only style guaranteed to resolve (built into QtWidgets); on Qt 6.5+ Fusion
 # additionally follows the freedesktop prefer-dark hint already set on this
-# machine. Best-effort: the deterministic eye-strain fix is the 430px column
+# machine. Best-effort: the deterministic eye-strain fix is the 460px column
 # snap from omarchy-emulator-snap, which leaves no white area visible.
 #
 # Usage: omarchy-emulator [-avd pixel] [emulator args...]

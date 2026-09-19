@@ -76,6 +76,17 @@ hl.config({
   },
 })
 
+-- Dwindle split pin: manual resizes (Super+RightClick drag, Super+Alt+Arrow)
+-- survive window switches instead of snapping back to 50/50. Already true in
+-- Omarchy's defaults; pinned here so a future default flip can't silently
+-- reset the emulator/IDE split. Verified live via
+-- `hyprctl getoption dwindle:preserve_split`.
+hl.config({
+  dwindle = {
+    preserve_split = true,
+  },
+})
+
 -- Lone-window flush guard: a workspace holding exactly one visible tiled
 -- window (w[tv1]) — or one floating window (f[1]) — stays flush even if gaps
 -- or frames are raised in the base general block above later. With the current
