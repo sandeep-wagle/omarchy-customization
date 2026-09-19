@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# omarchy-emulator — launch the Android emulator with a dark Qt style.
+#
+# The emulator bundles its own Qt 6 (no platformthemes/styles plugins), so it
+# ignores the system gtk3 dark theme and paints a white canvas wherever the
+# phone display doesn't fill its window. `QT_STYLE_OVERRIDE=Fusion` is the
+# only style guaranteed to resolve (built into QtWidgets); on Qt 6.5+ Fusion
+# additionally follows the freedesktop prefer-dark hint already set on this
+# machine. Best-effort: the deterministic eye-strain fix is the 430px column
+# snap from omarchy-emulator-snap, which leaves no white area visible.
+#
+# Usage: omarchy-emulator [-avd pixel] [emulator args...]
+set -u
+
+EMULATOR="${HOME}/Android/Sdk/emulator/emulator"
+if [ ! -x "$EMULATOR" ]; then
+  echo "omarchy-emulator: not found: $EMULATOR" >&2
+  exit 1
+fi
+
+export QT_STYLE_OVERRIDE=Fusion
+exec "$EMULATOR" "$@"
