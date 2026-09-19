@@ -51,6 +51,48 @@ hl.config({
 })
 
 -- =============================================================================
+-- Pointer speed: mouse + touchpad cursor movement (NOT scroll speed --
+-- scroll is scroll_factor in the touchpad block above).
+-- =============================================================================
+-- How speed works here (three layers, later wins):
+--   1. Omarchy default: input.sensitivity = 0.0 for every pointer.
+--   2. Global override: hl.config({ input = { sensitivity = X } }) -- affects
+--      ALL mice + touchpads at once. Range -1.0 (slow) to 1.0 (fast).
+--   3. Per-device override below: wins for that one device only.
+--
+-- Per-device syntax is hl.device({ name = "<from hyprctl devices>", ... })
+-- (Hyprland wiki: Configuring -> Advanced -> Devices). Any input-category
+-- option may go inside EXCEPT follow_mouse-style window-management ones.
+--
+-- Your devices (from `hyprctl devices`):
+--   touchpad = "pnp0c50:00-06cb:7e7e-touchpad"
+--   mouse    = "pnp0c50:00-06cb:7e7e-mouse"
+--   (a "ps/2-synaptics-touchpad" also shows up -- that is a phantom fallback
+--   entry, leave it alone; the pnp0c50 touchpad above is the real one.)
+--
+-- Current values below equal the defaults (0.0), so feel is UNCHANGED --
+-- they just make every knob visible. To tune: change a number, save, run
+-- `hyprctl reload && hyprctl configerrors`. Typical starting points:
+-- touchpad 0.2 to 0.4 (faster glide), mouse 0.0 to 0.3.
+--
+-- Acceleration (applies globally): accel_profile = "adaptive" (Omarchy
+-- default: speeds up fast flicks) or "flat" (1:1, gamers/fine work).
+-- Uncomment to change:
+--   hl.config({ input = { accel_profile = "flat" } })
+
+-- Touchpad pointer speed (finger glide -> cursor movement).
+hl.device({
+  name = "pnp0c50:00-06cb:7e7e-touchpad",
+  sensitivity = 0.0,
+})
+
+-- External/USB mouse pointer speed.
+hl.device({
+  name = "pnp0c50:00-06cb:7e7e-mouse",
+  sensitivity = 0.0,
+})
+
+-- =============================================================================
 -- Finger gestures.
 -- =============================================================================
 -- hl.gesture takes: fingers (number), direction ("horizontal", "left",
