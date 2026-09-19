@@ -1,0 +1,227 @@
+#!/usr/bin/env python3
+"""omarchy-emulator-snap — keep the Android Emulator at a slim 430px column.
+
+Problem: Hyprland tiles the emulator into a wide 50/50 split, but the phone
+renders at ~410px, so bundled Qt fills the rest with a blinding white canvas.
+
+This daemon listens on Hyprland's socket2 for `openwindow>>` events. When the
+main phone window (class Emulator / qemu-system-x86_64, the large tiled one —
+NOT the 54px toolbar or extended-controls dialogs) opens, it snaps the width
+to exactly 430px via the Hyprland-Lua dispatch verified live on this machine:
+
+    hl.dsp.focus({ window = "address:0xADDR" })
+    hl.dsp.window.resize({ x = 430, y = <current height> })
+
+Focus is saved and restored around the resize (two jumps inside ~100ms).
+Classic `resizewindowpixel ... address:` does not exist on Hyprland-Lua
+builds, hence the focus/resize/restore sequence.
+
+Single-instance via pidfile. Never raises; logs to
+~/.local/state/omarchy/emulator-snap.log.
+"""
+
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+
+HOME = os.path.expanduser("~")
+LOG = Path(HOME) / ".local" / "state" / "omarchy" / "emulator-snap.log"
+PIDFILE = Path(HOME) / ".local" / "state" / "omarchy" / "emulator-snap.pid"
+
+TARGET_W = 430
+MIN_SNAP_W = 200   # windows narrower than this are the toolbar/dialogs: skip
+SKIP_W_TOL = 15    # already within TARGET_W +- tol: skip
+SETTLE_S = 0.8     # wait for map + tiling before first snap
+RETRY_S = 2.0      # Qt sometimes self-resizes after map: re-check once
+
+MAIN_CLASS = re.compile(r"^(Emulator|emulator|qemu-system-x86_64)$")
+
+
+def log(msg):
+    try:
+        LOG.parent.mkdir(parents=True, exist_ok=True)
+        if LOG.is_file() and LOG.stat().st_size > 200 * 1024:
+            LOG.unlink()
+        with open(LOG, "a") as f:
+            f.write(f"{time.strftime('%F %T')} {msg}\n")
+    except Exception:
+        pass
+
+
+def run(cmd, timeout=12):
+    try:
+        return subprocess.run(cmd, capture_output=True, timeout=timeout).stdout.decode("utf-8", "replace")
+    except Exception:
+        return ""
+
+
+def hyprctl_j(args):
+    try:
+        return json.loads(run(["hyprctl", "-j"] + args).strip() or "null")
+    except Exception:
+        return None
+
+
+def dispatch(lua):
+    run(["hyprctl", "dispatch", lua])
+
+
+def socket2_path():
+    sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")
+    rt = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    if sig:
+        p = Path(rt) / "hypr" / sig / ".socket2.sock"
+        if p.exists():
+            return str(p)
+    try:
+        cands = sorted(Path(rt, "hypr").glob("*/.socket2.sock"),
+                       key=lambda p: p.stat().st_mtime, reverse=True)
+        if cands:
+            return str(cands[0])
+    except Exception:
+        pass
+    return None
+
+
+def norm_addr(raw):
+    raw = (raw or "").strip().split(",")[0]
+    if not raw:
+        return ""
+    return raw if raw.startswith("0x") else "0x" + raw
+
+
+def single_instance():
+    try:
+        PIDFILE.parent.mkdir(parents=True, exist_ok=True)
+        if PIDFILE.is_file():
+            try:
+                old = int(PIDFILE.read_text().strip())
+            except ValueError:
+                old = 0
+            if old and old != os.getpid():
+                try:
+                    os.kill(old, 0)
+                    return False
+                except (ProcessLookupError, PermissionError):
+                    pass
+        PIDFILE.write_text(str(os.getpid()))
+    except Exception:
+        pass
+    return True
+
+
+def find_window(addr):
+    clients = hyprctl_j(["clients"])
+    if not isinstance(clients, list):
+        return None
+    addr = addr.lower()
+    for w in clients:
+        if isinstance(w, dict) and str(w.get("address", "")).lower() == addr:
+            return w
+    return None
+
+
+def snap(addr):
+    """Snap one window to TARGET_W, preserving height. Returns True if done."""
+    w = find_window(addr)
+    if not w:
+        return True  # closed meanwhile: nothing to do
+    cls = str(w.get("class", ""))
+    if not MAIN_CLASS.match(cls):
+        return True
+    if w.get("floating"):
+        return True  # toolbar / dialogs float: leave alone
+    try:
+        if int(w.get("fullscreen", 0) or 0) != 0:
+            return True
+    except Exception:
+        pass
+    try:
+        cur_w, cur_h = int(w["size"][0]), int(w["size"][1])
+    except Exception:
+        return True
+    if cur_w < MIN_SNAP_W:
+        return True  # toolbar-sized: skip
+    if abs(cur_w - TARGET_W) <= SKIP_W_TOL:
+        return True  # already narrow
+    prev = hyprctl_j(["activewindow"])
+    prev_addr = prev.get("address") if isinstance(prev, dict) else None
+    dispatch(f'hl.dsp.focus({{ window = "address:{addr}" }})')
+    time.sleep(0.15)
+    dispatch(f"hl.dsp.window.resize({{ x = {TARGET_W}, y = {cur_h} }})")
+    time.sleep(0.15)
+    if prev_addr and prev_addr != addr:
+        dispatch(f'hl.dsp.focus({{ window = "address:{prev_addr}" }})')
+    log(f"snap {addr} ({cls}) {cur_w}x{cur_h} -> {TARGET_W}x{cur_h}")
+    return True
+
+
+def handle_open(addr):
+    time.sleep(SETTLE_S)
+    snap(addr)
+    time.sleep(RETRY_S)
+    w = find_window(addr)
+    if not w:
+        return
+    try:
+        cur_w = int(w["size"][0])
+    except Exception:
+        return
+    if cur_w > TARGET_W + SKIP_W_TOL and not w.get("floating"):
+        log(f"retry {addr}: still {cur_w}px, snapping again")
+        snap(addr)
+
+
+def main():
+    if not single_instance():
+        print("emulator-snap already running")
+        return 0
+    log("started")
+    while True:
+        sock = socket2_path()
+        if not sock:
+            log("no socket2; retrying")
+            time.sleep(5)
+            continue
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(30)
+            s.connect(sock)
+            buf = b""
+            while True:
+                try:
+                    chunk = s.recv(4096)
+                except socket.timeout:
+                    continue
+                if not chunk:
+                    break
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    try:
+                        ev = line.decode("utf-8", "replace").strip()
+                    except Exception:
+                        continue
+                    if ev.startswith("openwindow>>"):
+                        # payload: ADDRESS,WORKSPACE,CLASS,TITLE (title may
+                        # hold commas; at open time it is often still the
+                        # bare "Emulator", so match on class here and let
+                        # snap() discriminate by live size afterwards).
+                        parts = ev.split(">>", 1)[1].split(",", 3)
+                        if len(parts) >= 3 and MAIN_CLASS.match(parts[2].strip()):
+                            addr = norm_addr(parts[0])
+                            threading.Thread(target=handle_open,
+                                             args=(addr,), daemon=True).start()
+        except Exception as e:
+            log(f"socket loop: {e!r}")
+        time.sleep(2.0)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

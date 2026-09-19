@@ -19,15 +19,27 @@ o.window({ class = "^omarchy\\.switch$" }, {
   animation = "popin 90%",
 })
 
--- Android Emulator / QEMU: the emulator is really two windows (the phone
--- screen plus a separate side toolbar), so it must float FREELY — no
--- workspace assignment, no rigid size (both trap input or clip the toolbar
--- on multi-monitor setups). Plain floating utility, decorations stripped
--- (Xwayland skin ghosting), normal focus passing everywhere.
+-- Android Emulator / QEMU: tile the phone screen naturally in the grid
+-- side-by-side with the editor (no floating overlay covering code).
+-- Only a small helper/toolbar dialog (if it appears as a separate window)
+-- is allowed to float beside the tiled phone.
+-- Force Android emulator to tile naturally in the grid
 o.window({ class = "^([Ee]mulator|qemu-system-x86_64)$" }, {
-  float = true,
+  tile = true,
   no_blur = true,
   no_shadow = true,
   border_size = 0,
-  no_initial_focus = true,
+  rounding = 20,
 })
+
+-- Small emulator helper toolbar / extended-controls dialog: keep floating,
+-- compact, and out of the tiling grid so it can dock flush beside the phone.
+o.window({ class = "^([Ee]mulator|qemu-system-x86_64)$", title = "(Extended controls|Emulator Settings|Snapshots|Toolbar)" }, {
+  float = true,
+  size = { 380, 600 },
+  center = true,
+})
+
+-- NOTE: Hyprland `size` only affects floating windows, so a static rule
+-- cannot force the tiled 430px column. omarchy-emulator-snap (socket2
+-- daemon, see bin/) snaps the phone to exactly 430px on openwindow.
