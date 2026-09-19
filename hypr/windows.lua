@@ -19,29 +19,28 @@ o.window({ class = "^omarchy\\.switch$" }, {
   animation = "popin 90%",
 })
 
--- Android Emulator / QEMU: floating tool-window (Android Studio style).
+-- Android Emulator / QEMU: tile EVERYTHING (phone + toolbar + dialogs stay
+-- in the grid; extended-controls keeps its centered float below).
 --
--- Why float instead of tile: when tiled, dwindle hands the phone a 50%+
--- column it can't fill (tall 1080x2424 panel), and bundled Qt paints the
--- leftover as a white canvas -- the window creeps 50% -> 75% -> 95% as Qt's
--- minimum grows during boot, and every extra window (dialogs, controllers)
--- steals another tile. Floating lets each window wrap its own content, so
--- there is no stretched allocation and no white void sitting over your code.
--- Drag either window once with Super+LeftDrag; Hyprland remembers.
-o.window({ class = "^([Ee]mulator|qemu-system-x86_64)$", title = "^Android Emulator" }, {
-  float = true,
-  size = { 480, 1040 },
-  move = { "(monitor_w-window_w)", "(monitor_h-window_h)/2" },
+-- Two lessons that killed the fancier setups:
+--   * Floating phone overlays the code underneath (unusable editor where it
+--     covers) and floating windows get left behind / stuck across workspace
+--     and monitor switches. Tiled windows do neither.
+--   * Title-based rules CANNOT split phone vs toolbar: at map time both
+--     windows are titled exactly "Emulator" (initialTitle; the phone only
+--     becomes "Android Emulator - ..." later, and rules don't re-evaluate),
+--     so any title rule matches both and they cascade into float. A single
+--     class-wide tile rule has no race: everything tiles, the 54px toolbar
+--     takes a slim column, and omarchy-emulator-snap holds the phone column
+--     at 460px (content is ~384px, so no white canvas). Pinned/floating is
+--     deliberately NOT used here for exactly the stuck-window reason above.
+o.window({ class = "^([Ee]mulator|qemu-system-x86_64)$" }, {
+  -- NOTE: no `tile` key exists -- tiling is Hyprland's default, and this
+  -- rule stays title-free on purpose (see above). Cosmetics only below.
   no_blur = true,
   no_shadow = true,
   border_size = 0,
   rounding = 20,
-})
-
--- Slim controller toolbar (title is exactly "Emulator", ~54px): float it
--- with its native size instead of letting it eat a whole tile column.
-o.window({ class = "^([Ee]mulator|qemu-system-x86_64)$", title = "^Emulator$" }, {
-  float = true,
 })
 
 -- Small emulator helper toolbar / extended-controls dialog: keep floating,
