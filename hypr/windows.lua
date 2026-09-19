@@ -19,17 +19,29 @@ o.window({ class = "^omarchy\\.switch$" }, {
   animation = "popin 90%",
 })
 
--- Android Emulator / QEMU: tile the phone screen naturally in the grid
--- side-by-side with the editor (no floating overlay covering code).
--- Only a small helper/toolbar dialog (if it appears as a separate window)
--- is allowed to float beside the tiled phone.
--- Force Android emulator to tile naturally in the grid
-o.window({ class = "^([Ee]mulator|qemu-system-x86_64)$" }, {
-  tile = true,
+-- Android Emulator / QEMU: floating tool-window (Android Studio style).
+--
+-- Why float instead of tile: when tiled, dwindle hands the phone a 50%+
+-- column it can't fill (tall 1080x2424 panel), and bundled Qt paints the
+-- leftover as a white canvas -- the window creeps 50% -> 75% -> 95% as Qt's
+-- minimum grows during boot, and every extra window (dialogs, controllers)
+-- steals another tile. Floating lets each window wrap its own content, so
+-- there is no stretched allocation and no white void sitting over your code.
+-- Drag either window once with Super+LeftDrag; Hyprland remembers.
+o.window({ class = "^([Ee]mulator|qemu-system-x86_64)$", title = "^Android Emulator" }, {
+  float = true,
+  size = { 480, 1040 },
+  move = { "(monitor_w-window_w)", "(monitor_h-window_h)/2" },
   no_blur = true,
   no_shadow = true,
   border_size = 0,
   rounding = 20,
+})
+
+-- Slim controller toolbar (title is exactly "Emulator", ~54px): float it
+-- with its native size instead of letting it eat a whole tile column.
+o.window({ class = "^([Ee]mulator|qemu-system-x86_64)$", title = "^Emulator$" }, {
+  float = true,
 })
 
 -- Small emulator helper toolbar / extended-controls dialog: keep floating,
@@ -40,6 +52,7 @@ o.window({ class = "^([Ee]mulator|qemu-system-x86_64)$", title = "(Extended cont
   center = true,
 })
 
--- NOTE: Hyprland `size` only affects floating windows, so a static rule
--- cannot force the tiled 430px column. omarchy-emulator-snap (socket2
--- daemon, see bin/) snaps the phone to exactly 430px on openwindow.
+-- NOTE: omarchy-emulator-snap (socket2 daemon, see ~/.local/bin/) stays as a
+-- backstop: if you ever tile the phone manually (Super+T), it snaps the
+-- column back to 460px. It ignores floating windows, so it stays out of the
+-- way of the floating tool-window setup above.
