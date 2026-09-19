@@ -83,7 +83,7 @@ hl.config({
 -- Touchpad pointer speed (finger glide -> cursor movement).
 hl.device({
   name = "pnp0c50:00-06cb:7e7e-touchpad",
-  sensitivity = 0.0,
+  sensitivity = 0.75,
 })
 
 -- External/USB mouse pointer speed.
