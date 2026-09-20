@@ -68,6 +68,21 @@ hl.config({
     gaps_in = 0,
     gaps_out = 0,
     border_size = 0,
+
+    -- Windows-style pointer resizing (overrides Omarchy default
+    -- resize_on_border = false in /usr/share/omarchy/default/hypr).
+    -- Hover any window edge/corner -> directional resize cursor appears;
+    -- press + drag resizes; tiled neighbors adapt via dwindle; works on
+    -- floating, XWayland (incl. emulator, min 200x200 respected) and Wayland.
+    -- Kept at the 15px default grab zone on purpose: our gaps/borders are 0
+    -- so this is the ONLY grab area, and a wider zone would steal
+    -- press-and-drag interactions (e.g. text selection) near window edges.
+    -- resize_corner intentionally left at default 0: it only forces which
+    -- corner FLOATING windows resize from, not pointer corner-dragging
+    -- (corners work through the grab-area geometry above).
+    resize_on_border = true,
+    hover_icon_on_border = true,
+    extend_border_grab_area = 15,
   },
 
   decoration = {
