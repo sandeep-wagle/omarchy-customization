@@ -6,10 +6,15 @@
 # phone display doesn't fill its window. `QT_STYLE_OVERRIDE=Fusion` is the
 # only style guaranteed to resolve (built into QtWidgets); on Qt 6.5+ Fusion
 # additionally follows the freedesktop prefer-dark hint already set on this
-# machine. Best-effort: the deterministic eye-strain fix is the 460px column
-# snap from omarchy-emulator-snap, which leaves no white area visible.
+# machine. The window sizing itself is left entirely to Hyprland: the phone
+# is pseudotiled (keeps its requested size, siblings adapt), no fixed widths.
 #
 # Usage: omarchy-emulator [-avd pixel] [emulator args...]
+# NOTE on window/viewport size: -fixed-scale was tested and does NOT change
+# the settled geometry (950x530 with it or without), and -scale is deprecated
+# and verified ignored. The initial viewport zoom is the emulator's own
+# auto-scale decision; see comments in windows.lua. Zoom in/out with
+# Ctrl+Up / Ctrl+Down inside the emulator; pseudo-tile follows.
 set -u
 
 EMULATOR="${HOME}/Android/Sdk/emulator/emulator"
