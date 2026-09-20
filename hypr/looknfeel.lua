@@ -67,7 +67,11 @@ hl.config({
 
     gaps_in = 0,
     gaps_out = 0,
-    border_size = 0,
+    -- 1px border (not 0): the resize drag only starts on presses OUTSIDE the
+    -- window content rect (Hyprland 0.56.2 InputManager), and border pixels
+    -- live outside that rect -- so this 1px line is what makes screen-edge
+    -- and seam grabs reachable. Near-invisible; dimming stays the focus cue.
+    border_size = 1,
 
     -- Windows-style pointer resizing (overrides Omarchy default
     -- resize_on_border = false in /usr/share/omarchy/default/hypr).
