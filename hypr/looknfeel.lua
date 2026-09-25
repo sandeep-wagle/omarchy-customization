@@ -26,12 +26,13 @@
 -- })
 
 -- https://wiki.hypr.land/Configuring/Basics/Variables/#animations
--- hl.config({
---   animations = {
---     -- Disable all animations.
---     enabled = false,
---   },
--- })
+-- No translate/slide on windows: tile-shuffle moves snap instantly
+-- (windows leaf off = zero positional motion), while open/close use
+-- popin 100% (no scaling, fade only). Nothing ever slides around.
+-- User files load after the defaults, so these leaves win.
+hl.animation({ leaf = "windows", enabled = false })
+hl.animation({ leaf = "windowsIn", enabled = true, speed = 8, bezier = "default", style = "popin 100%" })
+hl.animation({ leaf = "windowsOut", enabled = true, speed = 8, bezier = "default", style = "popin 100%" })
 
 -- https://wiki.hypr.land/Configuring/Basics/Variables/#layout
 -- hl.config({
