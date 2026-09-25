@@ -129,3 +129,15 @@ hl.window_rule({
   border_size = 0,
   rounding    = 0,
 })
+
+-- External HDMI-A-1 sits at 60Hz (native panel ceiling) while eDP-1 runs
+-- 144Hz, so fullscreen content on the secondary can otherwise add an extra
+-- compositor frame hop to its present timeline. `direct_scanout` lets a
+-- fullscreen window on ANY output flip straight to the display (bypassing the
+-- composited swapchain) — shaves that hop for games / fullscreen video on the
+-- external, and is inert while windows are tiled.
+hl.config({
+  render = {
+    direct_scanout = 1,
+  },
+})

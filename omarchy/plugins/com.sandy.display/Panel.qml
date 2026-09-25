@@ -18,6 +18,7 @@ Panel {
   property int pendingBrightnessPercent: 0
   property bool brightnessSetQueued: false
   property bool brightnessAvailable: false
+  property bool brightnessReadQueued: false
   property string internalMonitor: ""
   property string externalMonitor: ""
   property string focusedMonitor: ""
@@ -91,6 +92,16 @@ Panel {
     }
     return null
   }
+  // The single output every value control (SCALE / RESOLUTION / REFRESH /
+  // BRIGHTNESS) acts on: the monitor explicitly clicked in DISPLAYS, falling
+  // back to the compositor-focused one only when no explicit selection exists.
+  // Following live focus once a monitor is picked is what made clicks on
+  // HDMI-A-1 edit eDP-1, so ownership is one-way: click wins, forever.
+  function activeTargetMonitor() {
+    if (selectedMonitor !== "") return selectedMonitor
+    if (focusedMonitor !== "") return focusedMonitor
+    return ""
+  }
   readonly property var scaleValues: {
     var sel = selectedDisplay()
     if (sel) return Model.availableScales(scalePresets, sel.width, sel.height)
@@ -105,12 +116,23 @@ Panel {
   property int selectedIndex: 0
   property bool cursorActive: false
 
-  // Text size slider — curated macOS-style notches (px). The panel snaps to
-  // these stops; the CLI (omarchy-display-text-size) accepts any integer in range.
+  // Text size slider — curated macOS-style notches (px). With a single
+  // display it edits the ONE global base-size (shell bar fonts + bar height,
+  // GTK text-scaling, terminals). With 2+ displays the slider re-scopes to
+  // the SELECTED monitor's EFFECTIVE text size (= global base × that monitor's
+  // Hyprland scale): dragging it retargets that output's scale so only that
+  // screen's UI (bar + panels + GTK + terminals) resizes. The "BASE" pill in
+  // the header flips the slider back to the shared global base-size knob.
   readonly property var textSizeStops: [9, 10, 11, 12, 14, 16, 20]
+  // Scope of the TEXT SIZE slider: "target" (selected monitor's effective
+  // size via its scale) or "global" (the shared base-size). Stays "target";
+  // with a single display the effective size IS the base, so it degrades to
+  // the global slider automatically.
+  property string textScope: "target"
+  readonly property bool targetTextScope: textScope === "target" && root.enabledDisplayCount > 1
   // While a change is in flight, the chosen stop index overrides the live
-  // base-size so the knob doesn't snap back during the file round-trip. -1 =
-  // no pending change; follow Style.font.baseSize.
+  // value so the knob doesn't snap back during the file/scale round-trip.
+  // -1 = no pending change; follow the live (effective/global) value.
   property int textSizePreviewIndex: -1
 
   // A text-size change reflows the whole panel (both font and spacing scale),
@@ -332,14 +354,31 @@ Panel {
       return
     }
 
+    var target = root.activeTargetMonitor()
+    if (!target) return
     root.brightnessSetQueued = false
-    setBrightnessProc.command = ["omarchy-brightness-display", "--no-osd", "--monitor", root.focusedMonitor, percent + "%"]
+    // Per-target, never focused: internal outputs adjust the backlight
+    // (brightnessctl), external outputs go through DDC/CI (ddcutil), so the
+    // clicked monitor's brightness changes and nothing else's.
+    setBrightnessProc.command = ["omarchy-brightness-display", "--no-osd", "--monitor", target, percent + "%"]
     setBrightnessProc.running = true
   }
 
   function previewBrightness(value) {
     root.brightnessPercent = Model.clampBrightness(value)
     brightnessDebounce.restart()
+  }
+
+  // (Re)read brightness for the CURRENT configuration target (selected, else
+  // focused). Runs on open, on selection change, and on each state poll.
+  // Brightness availability is per-target too: selecting a monitor without a
+  // controllable backlight/DDC bus hides the section ("FIXED BRIGHTNESS").
+  function refreshBrightness() {
+    var target = root.activeTargetMonitor()
+    if (!target) return
+    if (brightnessReadProc.running) { root.brightnessReadQueued = true; return }
+    brightnessReadProc.command = ["omarchy-brightness-display", "--no-osd", "--monitor", target]
+    brightnessReadProc.running = true
   }
 
   function showBrightnessOsd(percent) {
@@ -398,14 +437,14 @@ Panel {
   }
 
   function setScale(scale) {
-    if (!selectedMonitor) return
-    // omarchy-hyprland-monitor-scaling always targets the focused monitor
-    // (and owns GDK_SCALE bookkeeping), so only use it when the selection
-    // is the focused one; otherwise apply to the selected output directly.
-    if (selectedMonitor === focusedMonitor)
-      actionProc.command = ["bash", "-c", "omarchy-hyprland-monitor-scaling " + scale]
-    else
-      actionProc.command = ["omarchy-display-mode", "scale", selectedMonitor, String(scale)]
+    var target = root.activeTargetMonitor()
+    if (!target) return
+    // ALWAYS the explicitly selected output. Never the omarchy-hyprland-monitor-
+    // scaling shortcut: that helper targets the compositor's FOCUSED monitor
+    // (`select(.focused == true)`) and rewrites monitors.lua's generic output=""
+    // catch-all, which lets one click retarget every monitor. Scoping must stay
+    // exact, so the per-output omarchy-display-mode path is used unconditionally.
+    actionProc.command = ["omarchy-display-mode", "scale", target, String(scale)]
     if (!actionProc.running) actionProc.running = true
   }
 
@@ -431,9 +470,10 @@ Panel {
   }
 
   function setResolution(res) {
-    if (!selectedMonitor || !res) return
+    var target = root.activeTargetMonitor()
+    if (!target || !res) return
     selectedResolution = res
-    actionProc.command = ["omarchy-display-mode", "resolution", selectedMonitor, res]
+    actionProc.command = ["omarchy-display-mode", "resolution", target, res]
     if (!actionProc.running) actionProc.running = true
   }
 
@@ -443,8 +483,9 @@ Panel {
   }
 
   function setRefreshRate(hz) {
-    if (!selectedMonitor) return
-    actionProc.command = ["omarchy-display-mode", "refresh", selectedMonitor, String(hz)]
+    var target = root.activeTargetMonitor()
+    if (!target) return
+    actionProc.command = ["omarchy-display-mode", "refresh", target, String(hz)]
     if (!actionProc.running) actionProc.running = true
   }
 
@@ -500,6 +541,18 @@ Panel {
       }
     }
     root.monitorModes = Model.parseRefreshRates(monitorsJson, selectedMonitor, rw, rh)
+    // Per-SELECTED-monitor scale, straight from the live dump. Both the TEXT
+    // SIZE effective-size math and the SCALE-preset highlight depend on it, so
+    // it must never describe the focused output once a target is chosen.
+    var targetScale = Model.scaleFor(String(monitorsJson || ""), selectedMonitor)
+    if (targetScale !== "") root.monitorScale = targetScale
+    // Drop the pending TEXT SIZE preview once the applied scale settles on the
+    // chosen stop, so the knob tracks the live effective size again.
+    if (root.textSizePreviewIndex >= 0) {
+      var targetEffective = Math.round(Style.font.baseSize * root.targetTextScale())
+      if (root.nearestTextStop(targetEffective) === root.textSizePreviewIndex)
+        root.textSizePreviewIndex = -1
+    }
   }
 
   // ---- Layout / presentation (2+ displays, via omarchy-display-mode) ----
@@ -508,7 +561,7 @@ Panel {
     if (!actionProc.running) actionProc.running = true
   }
 
-  // ---- Text size (shell base font + GTK text-scaling, via one CLI) ----
+  // ---- Text size (global base via one CLI, OR per-selected-monitor scale) ----
   function nearestTextStop(px) {
     var best = 0
     var bestDist = 1e9
@@ -519,30 +572,92 @@ Panel {
     return best
   }
 
+  // The selected monitor's live scale as a number (1 when unknown).
+  function targetTextScale() {
+    var s = parseFloat(String(root.monitorScale || ""))
+    return isFinite(s) && s > 0 ? s : 1
+  }
+
+  // True effective text size on the selected monitor = global base × scale.
+  function effectiveTargetTextPx() {
+    return Math.round(Style.font.baseSize * root.targetTextScale())
+  }
+
   // Effective stop index: the pending choice while a change is in flight,
-  // otherwise whatever Style's live base-size rounds to.
+  // otherwise where the live value (per-monitor effective or global base)
+  // rounds to.
   function currentTextIndex() {
-    return textSizePreviewIndex >= 0 ? textSizePreviewIndex : nearestTextStop(Style.font.baseSize)
+    if (textSizePreviewIndex >= 0) return textSizePreviewIndex
+    var px = root.targetTextScope ? root.effectiveTargetTextPx() : Style.font.baseSize
+    return root.nearestTextStop(px)
   }
 
-  // px shown in the header: the pending stop if any, else the true base-size
-  // (which may be an off-notch value set from the CLI).
+  // px shown in the header: the pending stop if any, else the true value
+  // (off-notch effective/global sizes that come from the CLI or scale).
   function displayedTextPx() {
-    return textSizePreviewIndex >= 0 ? textSizeStops[textSizePreviewIndex] : Style.font.baseSize
+    return textSizePreviewIndex >= 0
+      ? textSizeStops[textSizePreviewIndex]
+      : (root.targetTextScope ? root.effectiveTargetTextPx() : Style.font.baseSize)
   }
 
+  // Shared path for slider drags and h/l keys: take a stop, preview it, then
+  // apply it to whichever scope the slider currently owns. A stop that already
+  // equals the selected monitor's live effective size is a no-op, so clicking
+  // the current position never rewrites an off-preset scale.
+  function setTextSizeFromStop(idx) {
+    var px = textSizeStops[idx]
+    if (root.targetTextScope && Math.round(root.effectiveTargetTextPx()) === px) return
+    markReflowing()
+    textSizePreviewIndex = idx
+    if (root.targetTextScope) root.setTargetTextSize(px)
+    else root.setTextSize(px)
+  }
+
+  // The global base-size knob: shell bar fonts + bar height, GTK text-scaling,
+  // terminal point size — one number the whole desktop shares. Editing it here
+  // rescales every monitor proportionally (bar + GTK + terminals).
   function setTextSize(px) {
     textScaleProc.command = ["omarchy-display-text-size", String(px)]
     if (!textScaleProc.running) textScaleProc.running = true
   }
 
+  // Per-monitor effective text size: pick the achievable scale for the SELECTED
+  // output whose cleaned value lands closest to desiredPx/globalBase, then
+  // apply it through the same explicit-output path as the SCALE pills. Only
+  // that monitor's UI grows or shrinks.
+  function setTargetTextSize(px) {
+    var base = Style.font.baseSize
+    if (!isFinite(base) || base <= 0) return
+    if (Math.round(root.effectiveTargetTextPx()) === px) return
+    var target = root.activeTargetMonitor()
+    if (!target) return
+    var desired = Number(px) / base
+    var sel = root.selectedDisplay()
+    var w = sel ? sel.width : 0
+    var h = sel ? sel.height : 0
+    var bestScale = null
+    var bestDist = Infinity
+    for (var i = 0; i < root.scaleValues.length; i++) {
+      var clean = parseFloat(Model.cleanScale(root.scaleValues[i], w, h))
+      if (!isFinite(clean) || clean <= 0) continue
+      var d = Math.abs(clean - desired)
+      if (d < bestDist) { bestDist = d; bestScale = root.scaleValues[i] }
+    }
+    if (bestScale === null) return
+    root.setScale(bestScale)
+  }
+
   function adjustTextSize(deltaSteps) {
-    var idx = currentTextIndex() + deltaSteps
+    var idx = root.currentTextIndex() + deltaSteps
     if (idx < 0) idx = 0
     if (idx > textSizeStops.length - 1) idx = textSizeStops.length - 1
-    markReflowing()
-    textSizePreviewIndex = idx
-    setTextSize(textSizeStops[idx])
+    root.setTextSizeFromStop(idx)
+  }
+
+  function toggleTextScope() {
+    if (root.enabledDisplayCount <= 1) return
+    textSizePreviewIndex = -1
+    root.textScope = root.textScope === "target" ? "global" : "target"
   }
 
   implicitWidth: button.implicitWidth
@@ -588,6 +703,7 @@ Panel {
       selectedResolution = (sel && sel.width > 0 && sel.height > 0)
         ? sel.width + "x" + sel.height : ""
       if (opened && monitorsJsonCache !== "") updateModes(monitorsJsonCache)
+      root.refreshBrightness()
     }
   }
 
@@ -598,7 +714,11 @@ Panel {
   }
   onMonitorModesChanged: clampCursor()
   onResolutionModesChanged: clampCursor()
-  onSelectedMonitorChanged: clampCursor()
+  onSelectedMonitorChanged: {
+    clampCursor()
+    // Re-point brightness at the newly selected output (backlight vs DDC).
+    root.refreshBrightness()
+  }
   onScaleValuesChanged: clampCursor()
   onVisibleSectionsChanged: clampCursor()
 
@@ -619,15 +739,22 @@ Panel {
       waitForEnd: true
       onStreamFinished: {
         var lines = String(text || "").split("\n")
-        var brightness = String(lines[0] || "").trim()
-        root.brightnessAvailable = brightness !== "unavailable" && brightness !== ""
-        root.brightnessPercent = root.brightnessAvailable ? Math.max(0, Math.min(100, parseInt(brightness, 10))) : 0
+        // lines[0] is the FOCUSED monitor's brightness and is deliberately
+        // ignored — brightness is read fresh for the explicitly selected
+        // target below, so it can never chase the mouse across monitors.
+        root.refreshBrightness()
         root.internalMonitor = String(lines[1] || "").trim()
         root.externalMonitor = String(lines[2] || "").trim()
         root.internalEnabled = String(lines[3] || "").trim() !== ""
         root.mirrorEnabled = String(lines[4] || "").trim() === root.externalMonitor && root.externalMonitor !== ""
         root.focusedMonitor = String(lines[5] || "").trim()
-        root.monitorScale = root.normalizeScale(String(lines[6] || "").trim())
+        // Scale is owned by the SELECTED target via updateModes (modesProc
+        // carries the per-monitor value); this focused-monitor line is only a
+        // stopgap before the first explicit selection lands. It must never
+        // overwrite the selected monitor's scale — else TEXT SIZE and the
+        // SCALE highlight would chase the mouse across outputs.
+        if (root.selectedMonitor === "")
+          root.monitorScale = root.normalizeScale(String(lines[6] || "").trim())
         root.updateDisplays(String(lines[7] || "[]").trim())
       }
     }
@@ -654,6 +781,29 @@ Panel {
       if (running) return
       if (root.brightnessSetQueued) {
         root.setBrightness(root.pendingBrightnessPercent)
+      }
+    }
+  }
+
+  // Reads brightness for the SELECTED target output (backlight for
+  // eDP/LVDS/DSI, DDC/CI for external), never the focused one. Availability
+  // is per-target: no device behind the output hides the section.
+  Process {
+    id: brightnessReadProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var raw = String(text || "").trim()
+        var available = raw !== "" && raw !== "unavailable"
+        root.brightnessAvailable = available
+        root.brightnessPercent = available ? Model.clampBrightness(raw) : 0
+      }
+    }
+    onRunningChanged: {
+      if (running) return
+      if (root.brightnessReadQueued) {
+        root.brightnessReadQueued = false
+        root.refreshBrightness()
       }
     }
   }
@@ -737,15 +887,19 @@ Panel {
     onTriggered: root.reflowingText = false
   }
 
-  // Once Style's base-size catches up to the pending choice, drop the preview
-  // so the slider tracks the live value again. The change itself reflows the
-  // panel, so suppress hover for a beat while it lands.
+  // Once the live value (per-monitor effective size or global base, whichever
+  // scope the slider owns) catches up to the pending choice, drop the preview
+  // so the slider tracks the real value again. The change itself reflows the
+  // panel for the global path, so suppress hover for a beat while it lands.
   Connections {
     target: Style
     function onFontBaseSizeChanged() {
       root.markReflowing()
-      if (root.textSizePreviewIndex >= 0
-          && root.nearestTextStop(Style.font.baseSize) === root.textSizePreviewIndex)
+      if (root.textSizePreviewIndex < 0) return
+      var px = root.targetTextScope
+        ? root.effectiveTargetTextPx()
+        : Style.font.baseSize
+      if (root.nearestTextStop(px) === root.textSizePreviewIndex)
         root.textSizePreviewIndex = -1
     }
   }
@@ -922,6 +1076,22 @@ Panel {
                 anchors.verticalCenter: parent.verticalCenter
               }
 
+              // Name the output BRIGHTNESS targets — reads via backlight
+              // (internal) or DDC/CI (external) exactly as the click chose.
+              Text {
+                id: brightnessMonitor
+                textFormat: Text.PlainText
+                text: root.activeTargetMonitor()
+                visible: root.enabledDisplayCount > 1 && root.activeTargetMonitor() !== ""
+                color: Qt.darker(root.bar.foreground, 1.4)
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+                anchors.left: brightnessHeader.right
+                anchors.leftMargin: Style.space(10)
+                anchors.verticalCenter: parent.verticalCenter
+              }
+
               Text {
                 id: brightnessPercent
                 textFormat: Text.PlainText
@@ -984,7 +1154,7 @@ Panel {
 
             Item {
               width: parent.width
-              implicitHeight: Math.max(textSizeHeader.implicitHeight, textSizePx.implicitHeight)
+              implicitHeight: Math.max(textSizeHeader.implicitHeight, textSizePx.implicitHeight, basePill.implicitHeight)
 
               PanelSectionHeader {
                 id: textSizeHeader
@@ -993,6 +1163,43 @@ Panel {
                 fontFamily: root.bar.fontFamily
                 anchors.left: parent.left
                 anchors.verticalCenter: parent.verticalCenter
+              }
+
+              // Name the monitor whose EFFECTIVE text size the slider owns when
+              // it is per-monitor scoped (2+ displays), mirroring the other
+              // target-labelled sections.
+              Text {
+                id: textSizeMonitor
+                textFormat: Text.PlainText
+                text: root.activeTargetMonitor()
+                visible: root.enabledDisplayCount > 1 && root.activeTargetMonitor() !== ""
+                color: Qt.darker(root.bar.foreground, 1.4)
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+                anchors.left: textSizeHeader.right
+                anchors.leftMargin: Style.space(10)
+                anchors.verticalCenter: parent.verticalCenter
+              }
+
+              // The shared global base-size the whole desktop uses. Active
+              // while the slider is GLOBAL-scoped; clicking flips the slider
+              // between "this monitor's effective size" and "global base size".
+              Button {
+                id: basePill
+                text: "BASE " + Style.font.baseSize + "px"
+                fontSize: Style.font.caption
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+                horizontalPadding: Style.spacing.sm
+                verticalPadding: Style.spacing.xxs
+                bordered: true
+                active: root.textScope === "global"
+                visible: root.enabledDisplayCount > 1
+                anchors.right: textSizePx.left
+                anchors.rightMargin: Style.space(6)
+                anchors.verticalCenter: parent.verticalCenter
+                onClicked: root.toggleTextScope()
               }
 
               Text {
@@ -1032,7 +1239,7 @@ Panel {
                 integer: true
                 tickCount: root.textSizeStops.length
                 value: root.currentTextIndex()
-                onReleased: function(v) { root.setTextSize(root.textSizeStops[Math.round(v)]) }
+                onReleased: function(v) { root.setTextSizeFromStop(Math.round(v)) }
               }
 
               HoverHandler {

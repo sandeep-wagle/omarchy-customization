@@ -33,6 +33,25 @@ function cleanScale(scale, width, height) {
   return normalizeScale(scaleUnits / 120)
 }
 
+// Live Hyprland scale for one output from `hyprctl monitors all -j`; "" when
+// the dump is missing/empty or the output isn't listed.
+function scaleFor(monitorsJson, outputName) {
+  var monitors = []
+  try {
+    monitors = monitorsJson ? JSON.parse(String(monitorsJson)) : []
+  } catch (e) {
+    return ""
+  }
+  if (!Array.isArray(monitors)) return ""
+  for (var i = 0; i < monitors.length; i++) {
+    if (monitors[i] && monitors[i].name === outputName) {
+      var s = Number(monitors[i].scale)
+      return isFinite(s) && s > 0 ? normalizeScale(String(s)) : ""
+    }
+  }
+  return ""
+}
+
 function matchingScaleIndex(scales, currentScale, width, height) {
   var current = Number(currentScale)
   if (!Array.isArray(scales) || !isFinite(current)) return -1
@@ -291,6 +310,7 @@ if (typeof module !== "undefined") {
     clampBrightness: clampBrightness,
     normalizeScale: normalizeScale,
     cleanScale: cleanScale,
+    scaleFor: scaleFor,
     matchingScaleIndex: matchingScaleIndex,
     availableScales: availableScales,
     brightnessName: brightnessName,
