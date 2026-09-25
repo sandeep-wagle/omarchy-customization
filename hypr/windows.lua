@@ -60,3 +60,9 @@ o.window({ class = "^([Ee]mulator|qemu-system-x86_64)$", title = "(Extended cont
 -- 1.0 (see hypr/input.lua), 1.0 here restores full-speed smooth touchpad
 -- scrolling in ghostty. User file loads after the defaults, so this wins.
 o.window("com.mitchellh.ghostty", { scroll_touchpad = 1.0 })
+
+-- Terminals fully opaque: Omarchy tags every window default-opacity
+-- (opacity 0.985 active / 0.96 inactive), so an unfocused terminal lets the
+-- desktop background faintly show through. Strip the tag and pin 1:1 on
+-- ghostty + foot (same pattern as davinci-resolve/hermes defaults).
+o.window("(com.mitchellh.ghostty|foot)", { tag = "-default-opacity", opacity = "1 1" })
