@@ -31,6 +31,7 @@ STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/omarchy-emulator-mouse"
 LOCK_FILE="$STATE_DIR/locked"
 SUSPEND_FILE="$STATE_DIR/suspended"
 PID_FILE="$STATE_DIR/watcher.pid"
+HOLDER_PID="$STATE_DIR/holder.pid"
 GUARD_FILE="$STATE_DIR/fwd-guard"
 INVOC_LOG="$STATE_DIR/invocations.log"
 POLL=0.03
@@ -121,13 +122,41 @@ stop_watcher() {
     rm -f "$PID_FILE"
   fi
   # Belt and braces: no orphan clamp loops ever.
-  pkill -f "omarchy-emulator-mouse watch" 2>/dev/null || true
+  # (Bracket trick so pkill never matches our own shell command line.)
+  pkill -f "omarchy-emulator-mouse watc[h]" 2>/dev/null || true
+}
+
+# Drag-look holder lifecycle. While held, every mouse motion arrives in the
+# emulator as a touch-drag, so the game camera follows the mouse with no
+# button pressed (shooting-mode feel). The press always lands on neutral
+# ground (window center = crosshair/look area, where a tap does nothing).
+start_hold() {
+  stop_hold quiet
+  setsid "$WARP" hold &>/dev/null &
+  echo $! >"$HOLDER_PID"
+}
+
+stop_hold() {
+  if [[ -f $HOLDER_PID ]]; then
+    local pid
+    pid=$(cat "$HOLDER_PID" 2>/dev/null)
+    # TERM => the holder's trap sends button-up before exiting.
+    [[ -n $pid ]] && kill -TERM "$pid" 2>/dev/null
+    sleep 0.1
+    kill -KILL "$pid" 2>/dev/null || true
+    rm -f "$HOLDER_PID"
+  fi
+  pkill -f "pointer-warp hol[d]" 2>/dev/null || true
+  # Redundant one-shot button-up: a lone release with no press is a no-op
+  # for clients, so this is safe even when nothing was held.
+  "$WARP" release 2>/dev/null || true
 }
 
 do_unlock() {
   local quiet="${1:-}"
   echo 0 >"$LOCK_FILE"
   rm -f "$SUSPEND_FILE"
+  stop_hold
   stop_watcher
   [[ $quiet != quiet ]] && notify "Mouse released"
 }
@@ -190,11 +219,14 @@ do_lock() {
   jq -r '.address' <<<"$foc" >"$STATE_DIR/addr"
   rm -f "$SUSPEND_FILE"
   echo 1 >"$LOCK_FILE"
-  # Start centered so the first clamp never yanks.
+  # Start centered (so the first clamp never yanks), THEN press-and-hold:
+  # from here every mouse motion is a touch-drag, i.e. the game camera
+  # follows the mouse with no button pressed.
   warp_global $((ax + aw / 2)) $((ay + ah / 2)) "$mon"
+  start_hold
   setsid "$0" watch &>/dev/null &
   echo $! >"$PID_FILE"
-  notify "Mouse locked to emulator (CapsLock releases, hold Super+X for desktop)"
+  notify "Mouse locked, drag-look ON (TAB releases, hold Super+X for desktop)"
   echo "locked"
 }
 
@@ -202,8 +234,8 @@ case "${1:-status}" in
   lock) do_lock ;;
   unlock) do_unlock; echo "free" ;;
   toggle)
-    log_invocation "toggle${2:+:$2}"
     if fresh_guard; then exit 0; fi
+    log_invocation "toggle${2:+:$2}"
     if [[ $(cat "$LOCK_FILE" 2>/dev/null) == "1" ]]; then
       do_unlock; echo "free"
     elif is_emulator_focused; then
@@ -213,8 +245,10 @@ case "${1:-status}" in
     fi
     ;;
   suspend) # Super+X press: free the pointer while held (lock stays armed).
+    # Drag ends first (button-up where the drag is), then the clamp stops.
     if [[ $(cat "$LOCK_FILE" 2>/dev/null) == "1" ]]; then
       touch "$SUSPEND_FILE"
+      stop_hold
       stop_watcher
       echo "suspended"
     else
@@ -226,6 +260,15 @@ case "${1:-status}" in
        [[ -f $SUSPEND_FILE ]]; then
       rm -f "$SUSPEND_FILE"
       if is_emulator_focused; then
+        # Re-center BEFORE pressing: the cursor may sit on a desktop UI
+        # element, and a synthetic press there would drag/click it.
+        local foc ax ay aw ah mon
+        foc=$(focused_json)
+        ax=$(jq -r '.at[0]' <<<"$foc"); ay=$(jq -r '.at[1]' <<<"$foc")
+        aw=$(jq -r '.size[0]' <<<"$foc"); ah=$(jq -r '.size[1]' <<<"$foc")
+        mon=$(jq -r '.monitor' <<<"$foc")
+        warp_global $((ax + aw / 2)) $((ay + ah / 2)) "$mon"
+        start_hold
         setsid "$0" watch &>/dev/null &
         echo $! >"$PID_FILE"
         echo "locked"
