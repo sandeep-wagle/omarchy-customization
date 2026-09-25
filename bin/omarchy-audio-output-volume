@@ -1,0 +1,129 @@
+#!/bin/bash
+
+# omarchy:summary=Adjust output volume and show the Omarchy OSD
+# omarchy:args=<raise|lower|mute-toggle|+N|-N>
+# omarchy:examples=omarchy audio output volume raise | omarchy audio output volume lower | omarchy audio output volume +1
+#
+# *** MSI CENTER TEMPERED BUILD (user shadow of /usr/share/omarchy/bin/omarchy-audio-output-volume) ***
+# Display <-> real mapping shared with MSI Controller (single contract):
+#   display 0-100  <-->  real 0-150  (real = 1.5 * display)
+# The OSD always shows DISPLAY values and steps in display space; only the
+# value written to the sink is tempered. True mute travels via mute-toggle.
+#
+# SINGLE-KNOB DIFFERENCE vs upstream: this shadow drives the *default* sink
+# itself (msi_dsp_input while the DSP chain runs, the physical sink
+# otherwise) -- it does NOT resolve through to the physical one. The audio
+# panel and the DSP service share this exact definition, so the keys, the
+# panel slider and the app can no longer fight over two different gains.
+# Pristine upstream kept at: ~/backups/omarchy-customization/ (install.sh
+# backup root). Re-apply strategy: this file is deployed by
+# ~/omarchy-customization/install.sh (apps type) and wins via the keybinding
+# override in hypr/bindings.lua, so omarchy updates cannot clobber it.
+
+action="${1:-}"
+
+if [[ -z $action ]]; then
+  echo "Usage: omarchy-audio-output-volume <raise|lower|mute-toggle|+N|-N>"
+  exit 1
+fi
+
+# Single-knob target: the current default sink. pactl prints the name plainly.
+sink="$(pactl get-default-sink 2>/dev/null)"
+if [[ -z $sink ]]; then
+  echo "Could not resolve an audio sink to control." >&2
+  exit 1
+fi
+
+# pactl reports the same percentage scale wpctl does (both are the raw volume
+# over PA_VOLUME_NORM), so the OSD reads identically either way.
+volume_percent() {
+  pactl get-sink-volume "$sink" 2>/dev/null |
+    awk 'NR == 1 {
+      for (i = 1; i <= NF; i++)
+        if ($i ~ /%$/) {sub("%", "", $i); print $i; exit}
+    }'
+}
+
+volume_muted() {
+  [[ $(pactl get-sink-mute "$sink" 2>/dev/null) == *yes ]]
+}
+
+# MSI temper helpers (integer percent units): display 0-100 <-> real 0-150.
+# NOTE: assignments split across lines — `local a=$1 b=$((a-40))` would
+# expand b before a is assigned.
+to_display() {
+  local real=$1
+  local d=$((real * 2 / 3))
+  ((d < 0)) && d=0
+  ((d > 100)) && d=100
+  printf '%s\n' "$d"
+}
+
+to_real() {
+  local display=$1
+  ((display < 0)) && display=0
+  ((display > 100)) && display=100
+  printf '%s\n' "$((display + display / 2))"
+}
+
+case "$action" in
+  raise) action="+5" ;;
+  lower) action="-5" ;;
+esac
+
+if [[ $action == "mute-toggle" ]]; then
+  runtime_dir="${XDG_RUNTIME_DIR:-/tmp}"
+  debounce_file="$runtime_dir/omarchy-audio-output-volume-mute-toggle.last"
+  now=$(date +%s%3N)
+  last=0
+  [[ -r $debounce_file ]] && read -r last <"$debounce_file" || true
+  if ((now - last < 250)); then
+    exit 0
+  fi
+  printf '%s\n' "$now" >"$debounce_file"
+
+  pactl set-sink-mute "$sink" toggle
+  display=$(to_display "$(volume_percent)")
+elif [[ $action =~ ^([+-])([0-9]+)$ ]]; then
+  direction="${BASH_REMATCH[1]}"
+  step="${BASH_REMATCH[2]}"
+
+  # ATOMIC server-side step (no read-modify-write race between overlapping
+  # key-repeat invocations — that race swallowed steps and stuck the UI).
+  # Deltas scale by 1.5x in real terms; relative steps stay atomic
+  # (no read-modify-write races), bounds enforced after.
+  pactl set-sink-mute "$sink" 0
+  pactl set-sink-volume "$sink" "${direction}${step}%"
+
+  # Clamp real into the temper band (display 0-100 <-> real 0-150).
+  current="$(volume_percent)"
+  if [[ -n $current ]]; then
+    if ((current > 150)); then
+      pactl set-sink-volume "$sink" "150%"
+    elif ((current < 0)); then
+      pactl set-sink-volume "$sink" "0%"
+    fi
+  fi
+else
+  echo "Unknown volume action: $action"
+  exit 1
+fi
+
+if volume_muted; then
+  icon="volume-muted"
+  display=0
+else
+  icon="volume-high"
+  display=$(to_display "$(volume_percent)")
+  # Keep the DSP service's persisted display level truthful so a service
+  # restart restores THIS intent instead of snapping back to a stale value.
+  # Write-only: the service reads this file solely at startup, so this
+  # cannot loop back into the live path. Skipped while muted so the
+  # pre-mute level survives a restart (mute itself is a boolean in the
+  # graph, restored separately).
+  mkdir -p "${HOME}/.config/msi-center" 2>/dev/null
+  awk -v d="${display:-0}" 'BEGIN{printf "%.4f", d/100}' \
+    > "${HOME}/.config/msi-center/msi-volume" 2>/dev/null || true
+fi
+
+omarchy-osd -i "$icon" -p "${display:-0}"
