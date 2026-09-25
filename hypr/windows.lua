@@ -51,3 +51,12 @@ o.window({ class = "^([Ee]mulator|qemu-system-x86_64)$", title = "(Extended cont
   size = { 380, 600 },
   center = true,
 })
+
+-- Ghostty touchpad scroll: Omarchy's default damps it to scroll_touchpad =
+-- 0.2 (ghostty multiplies deltas internally for its pixel-precise smooth
+-- scrolling, so undamped deltas fly). But that 0.2 stacks multiplicatively
+-- with the global touchpad scroll_factor (Omarchy default 0.4), which made
+-- 2-finger scrolling in the terminal crawl. Now that the global factor is
+-- 1.0 (see hypr/input.lua), 1.0 here restores full-speed smooth touchpad
+-- scrolling in ghostty. User file loads after the defaults, so this wins.
+o.window("com.mitchellh.ghostty", { scroll_touchpad = 1.0 })

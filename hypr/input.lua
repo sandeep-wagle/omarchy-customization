@@ -33,12 +33,17 @@ hl.config({
       --   false = Omarchy default (swipe up scrolls up)
       natural_scroll = true,
 
+      -- 2-finger scroll speed multiplier. Omarchy default is 0.4, which
+      -- feels sluggish (and it stacks multiplicatively with per-window
+      -- scroll_touchpad rules, so ghostty's 0.2 default rule made the
+      -- terminal crawl at 0.08). 1.0 = full-speed, matches other apps.
+      scroll_factor = 1.0,
+
       -- EXAMPLES (commented out = Omarchy defaults stay in effect):
       -- tap_to_click = true,       -- tap the pad to click (default: false)
       -- tap_and_drag = true,       -- tap-hold-drag to drag (default: false)
       -- disable_while_typing = true, -- palm rejection while typing (default: true)
-      -- scroll_factor = 1.0,       -- 2-finger scroll speed multiplier (default: 1.0;
-                                     -- Omarchy default is 0.4, so 1.0 = much faster)
+      -- clickfinger_behavior = true, -- 2 fingers = right-click (Omarchy default: true)
       -- clickfinger_behavior = true, -- 2 fingers = right-click (Omarchy default: true)
     },
   },
