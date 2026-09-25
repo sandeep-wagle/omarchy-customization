@@ -112,16 +112,14 @@ Panel {
   property var displayAudioSources: []
   property var displayAudioStreams: []
 
-  // A DSP sink -- a speaker tuning, or EasyEffects -- can be the selected output
-  // without being where loudness lives: changing its volume alters the level going
-  // *into* the processing, so the slider would move while the speakers did not,
-  // and on a chain with a limiter it would change the tone as well.
-  //
-  // omarchy-audio-output-sink resolves the *current* default output through any
-  // such sink to the physical one, which is the same definition the volume keys
-  // and the output switcher use. Resolving the default (rather than "whatever a
-  // tuning fronts") is what keeps this correct when headphones or HDMI are
-  // selected while a tuning still exists.
+  // MSI Center single-knob contract: the *default* sink (msi_dsp_input while
+  // the DSP chain runs, the physical sink otherwise) is the one and only
+  // volume authority. Display speaks 0-100%; the real sink level is tempered
+  // 0-150% (real = 1.5 * display) exactly once at each write, and de-tempered
+  // on every read. The physical speaker stays pinned at 100% and is never
+  // user-driven. Resolving the default (rather than "whatever a tuning
+  // fronts") is what keeps this correct when headphones or HDMI are selected
+  // while a tuning still exists -- same definition the volume keys use.
   property string volumeSinkName: ""
 
   // Carry sub-notch touchpad deltas between wheel events.
@@ -146,7 +144,12 @@ Panel {
     if (!volumeSinkProc.running) volumeSinkProc.running = true
   }
 
-  readonly property real outputVolume: volumeSink && volumeSink.audio ? volumeSink.audio.volume : 0
+  // Display units (0-1): the sink holds tempered real units (0-1.5), so the
+  // read path de-tempers. Matches setOutputVolume below and the volume keys.
+  readonly property real outputVolume: {
+    if (!volumeSink || !volumeSink.audio) return 0
+    return Math.max(0, Math.min(1, volumeSink.audio.volume / 1.5))
+  }
   readonly property bool outputMuted: volumeSink && volumeSink.audio ? volumeSink.audio.muted : false
   readonly property real inputVolume: source && source.audio ? source.audio.volume : 0
   readonly property bool inputMuted: source && source.audio ? source.audio.muted : false
@@ -426,11 +429,13 @@ Panel {
     return Model.outputVolumeName(volume, muted)
   }
 
+  // Display in (0-1), tempered real out (0-1.5): the single temper point for
+  // this UI, mirroring the volume keys and the DSP service. Returns display.
   function setOutputVolume(v) {
     if (!volumeSink || !volumeSink.audio) return outputVolume
-    var volume = Math.max(0, Math.min(1, v))
-    volumeSink.audio.volume = volume
-    return volume
+    var display = Math.max(0, Math.min(1, v))
+    volumeSink.audio.volume = Math.min(1.5, display * 1.5)
+    return display
   }
 
   function showVolumeOsd(volume) {
@@ -595,9 +600,12 @@ Panel {
     }
   }
 
+  // Single-knob contract: resolve the *default* sink itself (msi_dsp_input
+  // while the DSP chain runs), NOT through it to the physical one. pactl
+  // get-default-sink prints the sink name plainly.
   Process {
     id: volumeSinkProc
-    command: ["omarchy-audio-output-sink"]
+    command: ["pactl", "get-default-sink"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.volumeSinkName = String(text).trim()
@@ -613,8 +621,8 @@ Panel {
   }
 
   // Runs whether or not the panel is open: the bar shows and scrolls the output
-  // volume too, so an unresolved sink there would read and change the virtual
-  // tuning sink instead of the speakers.
+  // volume too, so the default sink must stay resolved as the DSP chain comes
+  // and goes (service restarts, daemon rebuilds).
   Timer {
     interval: 15000
     running: true

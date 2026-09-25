@@ -184,7 +184,23 @@ o.bind("SUPER + PRINT", "Fullscreen screenshot", "omarchy-capture-screenshot --f
 -- ============================================================
 -- MEDIA/HARDWARE KEYS
 -- ============================================================
--- Already handled by defaults (XF86 keys) - keep as-is
+-- Already handled by defaults (XF86 keys) - keep as-is,
+-- EXCEPT volume: the stock handler resolves through the DSP chain to the
+-- physical sink, which fights the panel/service single-knob contract
+-- (display 0-100 <-> real 0-150 on the *default* sink). Unbind the stock
+-- volume keys and point them at our shadow in ~/.local/bin instead.
+-- Note: XF86AudioRaiseVolume was previously bound to the stock
+-- omarchy-audio-output-volume. Unbinds below override it.
+hl.unbind("XF86AudioRaiseVolume")
+hl.unbind("XF86AudioLowerVolume")
+hl.unbind("XF86AudioMute")
+hl.unbind("ALT + XF86AudioRaiseVolume")
+hl.unbind("ALT + XF86AudioLowerVolume")
+o.bind("XF86AudioRaiseVolume", "Volume up", "/home/sandy/.local/bin/omarchy-audio-output-volume raise", { locked = true, repeating = true })
+o.bind("XF86AudioLowerVolume", "Volume down", "/home/sandy/.local/bin/omarchy-audio-output-volume lower", { locked = true, repeating = true })
+o.bind("XF86AudioMute", "Mute", "/home/sandy/.local/bin/omarchy-audio-output-volume mute-toggle", { locked = true })
+o.bind("ALT + XF86AudioRaiseVolume", "Volume up precise", "/home/sandy/.local/bin/omarchy-audio-output-volume +1", { locked = true, repeating = true })
+o.bind("ALT + XF86AudioLowerVolume", "Volume down precise", "/home/sandy/.local/bin/omarchy-audio-output-volume -1", { locked = true, repeating = true })
 
 -- Ctrl+Shift+M = Toggle microphone mute (3-key combo)
 o.bind("CTRL + SHIFT + M", "Toggle microphone mute", "omarchy-audio-input-mute", { locked = true })
