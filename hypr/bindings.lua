@@ -31,9 +31,10 @@ hl.unbind("SUPER + PRINT")
 -- Ctrl+Alt+Delete was "Close all windows" -> DANGEROUS, remove
 hl.unbind("CTRL + ALT + DELETE")
 
--- Super+C/V/X universal clipboard -> hijacks Super layer, apps use Ctrl+C/V/X
-hl.unbind("SUPER + C")
-hl.unbind("SUPER + V")
+-- Super+C/V universal clipboard -> restored on request (was unbound for
+-- hijacking the Super layer). Super+X stays unbound: it now frees the
+-- emulator mouse while held (see EMULATOR MOUSE CAPTURE below); cut is on
+-- Ctrl+X as usual.
 hl.unbind("SUPER + X")
 
 -- Super+Shift+Return for browser -> non-standard
