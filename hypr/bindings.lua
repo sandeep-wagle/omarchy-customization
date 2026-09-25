@@ -202,6 +202,23 @@ o.bind("XF86AudioMute", "Mute", "/home/sandy/.local/bin/omarchy-audio-output-vol
 o.bind("ALT + XF86AudioRaiseVolume", "Volume up precise", "/home/sandy/.local/bin/omarchy-audio-output-volume +1", { locked = true, repeating = true })
 o.bind("ALT + XF86AudioLowerVolume", "Volume down precise", "/home/sandy/.local/bin/omarchy-audio-output-volume -1", { locked = true, repeating = true })
 
+-- ============================================================
+-- EMULATOR MOUSE CAPTURE (BlueStacks-style, Free Fire on the Pixel AVD)
+-- ============================================================
+-- TAB toggles pointer confinement: unlocks when locked; locks when the
+-- emulator window is focused; otherwise re-emits Tab so normal typing feels
+-- identical (bare TAB only fires with no modifiers held -- Alt+Tab /
+-- Ctrl+Tab / Shift+Tab never land here). Hold Super+X to free the pointer
+-- for the desktop; releasing re-locks if still on the emulator, otherwise
+-- it stays free. Alt+Tab away also auto-releases via the watcher.
+-- Notes: CapsLock keeps its stock Compose/capital behavior untouched --
+-- the toggle lives on TAB instead. SUPER+X was the stock "Universal cut",
+-- unbound above. If a key name ever stops resolving, configerrors +
+-- `hyprctl binds` will show it -- adjust the spelling there first.
+o.bind("TAB", "Toggle emulator mouse capture", "/home/sandy/.local/bin/omarchy-emulator-mouse toggle bind", { locked = true })
+o.bind("SUPER + X", "Emulator mouse: hold to free pointer", "/home/sandy/.local/bin/omarchy-emulator-mouse suspend", { locked = true })
+o.bind("SUPER + X", "Emulator mouse: release to re-lock", "/home/sandy/.local/bin/omarchy-emulator-mouse resume", { locked = true, release = true })
+
 -- Ctrl+Shift+M = Toggle microphone mute (3-key combo)
 o.bind("CTRL + SHIFT + M", "Toggle microphone mute", "omarchy-audio-input-mute", { locked = true })
 
