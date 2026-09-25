@@ -1,0 +1,248 @@
+#!/bin/bash
+# omarchy-emulator-mouse -- BlueStacks-style mouse capture for the Android
+# emulator window (Free Fire / Pixel AVD).
+#
+# Model: a "locked" pointer is clamped inside the focused emulator window by a
+# small watcher loop (warps via omarchy-pointer-warp). Nothing is grabbed
+# at the Wayland level; the clamp simply pulls the cursor back to the window
+# edge whenever it strays out (~30ms poll).
+#
+#   lock     -- confine to the focused emulator window (refuses elsewhere)
+#   unlock   -- release (also runs automatically on Alt+Tab away / close)
+#   toggle   -- TAB key: unlock if locked; lock if emulator focused;
+#               otherwise re-emit Tab so normal typing is unaffected  [TAB]
+#   suspend  -- temporary release while locked   [Super+X press]
+#   resume   -- re-lock after a suspend          [Super+X release]
+#   status   -- print locked|free|suspended
+#   watch    -- internal: the clamp loop (do not call directly)
+#
+# "Emulator windows only" is enforced inside: every command (except unlock)
+# requires the focused window class to be the Android emulator.
+#
+# Deps: hyprctl, jq, omarchy-pointer-warp (repo src/pointer-warp.c).
+# State: $XDG_RUNTIME_DIR/omarchy-emulator-mouse/ (never touches disk config).
+
+set -u
+
+HYPR=/usr/bin/hyprctl
+WARP="${HOME}/.local/bin/omarchy-pointer-warp"
+WLRCTL="${HOME}/.local/bin/wlrctl"
+STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/omarchy-emulator-mouse"
+LOCK_FILE="$STATE_DIR/locked"
+SUSPEND_FILE="$STATE_DIR/suspended"
+PID_FILE="$STATE_DIR/watcher.pid"
+GUARD_FILE="$STATE_DIR/fwd-guard"
+INVOC_LOG="$STATE_DIR/invocations.log"
+POLL=0.03
+MARGIN=2
+
+mkdir -p "$STATE_DIR" 2>/dev/null
+
+notify() {
+  # Fire-and-forget: never let a notification stall a keypress path.
+  (command -v omarchy-notification-send >/dev/null 2>&1 &&
+    omarchy-notification-send -u low "Emulator mouse" "$1" 2>/dev/null || true) &
+}
+
+# Fresh guard => this run was caused by our own Tab re-emit below, not a
+# human keypress. Exit quietly so a compositor that matches virtual-keyboard
+# events against the TAB bind can never build a re-emit storm.
+fresh_guard() {
+  [[ -f $GUARD_FILE ]] || return 1
+  local now age
+  now=$(date +%s%N)
+  age=$(( (now - $(cat "$GUARD_FILE" 2>/dev/null || echo 0)) / 1000000 ))
+  (( age >= 0 && age < 1500 ))
+}
+
+log_invocation() {
+  printf '%s %s\n' "$(date +%s%N)" "$1" >>"$INVOC_LOG" 2>/dev/null
+  tail -n 50 "$INVOC_LOG" 2>/dev/null >"$INVOC_LOG.tmp" &&
+    mv "$INVOC_LOG.tmp" "$INVOC_LOG" 2>/dev/null || true
+}
+
+# Re-emit Tab for normal typing when the toggle has nothing to do (toggle is
+# only meaningful on the emulator window). CapsLock keeps its stock Compose
+# behavior; bare TAB needs no modifiers held to reach us (Hyprland matches
+# modmasks exactly, so Alt+Tab / Ctrl+Tab / Shift+Tab never land here).
+forward_tab() {
+  printf '%s' "$(date +%s%N)" >"$GUARD_FILE"
+  "$WLRCTL" keyboard type "$(printf '\t')" 2>/dev/null
+  sleep 0.25
+  rm -f "$GUARD_FILE"
+}
+
+# Focused window JSON (empty object when nothing is focused).
+focused_json() {
+  $HYPR activewindow -j 2>/dev/null | jq -c 'if type=="object" then . else {} end'
+}
+
+focused_class() {
+  focused_json | jq -r '.class // empty'
+}
+
+is_emulator_focused() {
+  [[ $(focused_class) == "Emulator" ]]
+}
+
+# Monitor logical geometry for a monitor id: "x y logw logh".
+monitor_geom() {
+  local id="$1"
+  $HYPR monitors -j 2>/dev/null | jq -r \
+    --argjson id "$id" \
+    '.[] | select(.id == $id) | "\(.x) \(.y) \(.width / .scale) \(.height / .scale)"'
+}
+
+# Warp to GLOBAL coords, mapping through the given monitor's logical rect
+# (Hyprland maps the absolute extent onto one output's logical box).
+warp_global() {
+  local gx="$1" gy="$2" mon="$3"
+  local g
+  g=$(monitor_geom "$mon") || return 1
+  local mx my mw mh
+  read -r mx my mw mh <<<"$g"
+  local rx ry
+  rx=$(awk -v g="$gx" -v m="$mx" 'BEGIN{printf "%d", g-m}') || return 1
+  ry=$(awk -v g="$gy" -v m="$my" 'BEGIN{printf "%d", g-m}') || return 1
+  local iw ih
+  iw=$(printf '%.0f' "$mw"); ih=$(printf '%.0f' "$mh")
+  "$WARP" "$rx" "$ry" "$iw" "$ih" 2>/dev/null
+}
+
+cursorpos() {
+  $HYPR cursorpos 2>/dev/null | tr -d ' ' | tr ',' ' '
+}
+
+stop_watcher() {
+  if [[ -f $PID_FILE ]]; then
+    local pid
+    pid=$(cat "$PID_FILE" 2>/dev/null)
+    [[ -n $pid ]] && kill "$pid" 2>/dev/null
+    rm -f "$PID_FILE"
+  fi
+  # Belt and braces: no orphan clamp loops ever.
+  pkill -f "omarchy-emulator-mouse watch" 2>/dev/null || true
+}
+
+do_unlock() {
+  local quiet="${1:-}"
+  echo 0 >"$LOCK_FILE"
+  rm -f "$SUSPEND_FILE"
+  stop_watcher
+  [[ $quiet != quiet ]] && notify "Mouse released"
+}
+
+# The clamp loop. Exits (unlocking) once focus stays off the emulator --
+# several consecutive misses required so one transient hyprctl hiccup can
+# never drop a lock mid-game; a real Alt+Tab away persists and releases.
+do_watch() {
+  echo $$ >"$PID_FILE"
+  local miss=0
+  while [[ $(cat "$LOCK_FILE" 2>/dev/null) == "1" ]] &&
+        [[ ! -f $SUSPEND_FILE ]]; do
+    local foc fclass
+    foc=$(focused_json)
+    fclass=$(jq -r '.class // empty' <<<"$foc")
+    if [[ $fclass != "Emulator" ]]; then
+      miss=$((miss + 1))
+      if ((miss >= 5)); then
+        printf '%s auto-unlock focus=%s\n' "$(date +%s)" "${fclass:-none}" \
+          >>"$STATE_DIR/unlock.log" 2>/dev/null
+        tail -n 20 "$STATE_DIR/unlock.log" >"$STATE_DIR/unlock.log.tmp" 2>/dev/null &&
+          mv "$STATE_DIR/unlock.log.tmp" "$STATE_DIR/unlock.log" 2>/dev/null || true
+        do_unlock quiet   # Alt+Tab away, window closed, empty workspace, ...
+        exit 0
+      fi
+      sleep "$POLL"
+      continue
+    fi
+    miss=0
+    local ax ay aw ah mon
+    ax=$(jq -r '.at[0]' <<<"$foc"); ay=$(jq -r '.at[1]' <<<"$foc")
+    aw=$(jq -r '.size[0]' <<<"$foc"); ah=$(jq -r '.size[1]' <<<"$foc")
+    mon=$(jq -r '.monitor' <<<"$foc")
+    local cx cy
+    read -r cx cy <<<"$(cursorpos)"
+    local nx=$cx ny=$cy moved=0
+    if ((cx < ax + MARGIN)); then nx=$((ax + MARGIN)); moved=1; fi
+    if ((cy < ay + MARGIN)); then ny=$((ay + MARGIN)); moved=1; fi
+    if ((cx > ax + aw - 1 - MARGIN)); then nx=$((ax + aw - 1 - MARGIN)); moved=1; fi
+    if ((cy > ah - 1 - MARGIN)); then ny=$((ay + ah - 1 - MARGIN)); moved=1; fi
+    # Bottom edge: Hyprland reserves the last pixel row, stay one higher.
+    if ((ny > ay + ah - 2 - MARGIN)); then ny=$((ay + ah - 2 - MARGIN)); moved=1; fi
+    [[ $moved == 1 ]] && warp_global "$nx" "$ny" "$mon"
+    sleep "$POLL"
+  done
+  rm -f "$PID_FILE"
+}
+
+do_lock() {
+  if ! is_emulator_focused; then
+    echo "omarchy-emulator-mouse: lock refused (emulator not focused)" >&2
+    exit 1
+  fi
+  stop_watcher
+  local foc ax ay aw ah mon
+  foc=$(focused_json)
+  ax=$(jq -r '.at[0]' <<<"$foc"); ay=$(jq -r '.at[1]' <<<"$foc")
+  aw=$(jq -r '.size[0]' <<<"$foc"); ah=$(jq -r '.size[1]' <<<"$foc")
+  mon=$(jq -r '.monitor' <<<"$foc")
+  jq -r '.address' <<<"$foc" >"$STATE_DIR/addr"
+  rm -f "$SUSPEND_FILE"
+  echo 1 >"$LOCK_FILE"
+  # Start centered so the first clamp never yanks.
+  warp_global $((ax + aw / 2)) $((ay + ah / 2)) "$mon"
+  setsid "$0" watch &>/dev/null &
+  echo $! >"$PID_FILE"
+  notify "Mouse locked to emulator (CapsLock releases, hold Super+X for desktop)"
+  echo "locked"
+}
+
+case "${1:-status}" in
+  lock) do_lock ;;
+  unlock) do_unlock; echo "free" ;;
+  toggle)
+    log_invocation "toggle${2:+:$2}"
+    if fresh_guard; then exit 0; fi
+    if [[ $(cat "$LOCK_FILE" 2>/dev/null) == "1" ]]; then
+      do_unlock; echo "free"
+    elif is_emulator_focused; then
+      do_lock
+    else
+      forward_tab; echo "forwarded"
+    fi
+    ;;
+  suspend) # Super+X press: free the pointer while held (lock stays armed).
+    if [[ $(cat "$LOCK_FILE" 2>/dev/null) == "1" ]]; then
+      touch "$SUSPEND_FILE"
+      stop_watcher
+      echo "suspended"
+    else
+      echo "free"
+    fi
+    ;;
+  resume) # Super+X release: clamp back down if still on the emulator.
+    if [[ $(cat "$LOCK_FILE" 2>/dev/null) == "1" ]] &&
+       [[ -f $SUSPEND_FILE ]]; then
+      rm -f "$SUSPEND_FILE"
+      if is_emulator_focused; then
+        setsid "$0" watch &>/dev/null &
+        echo $! >"$PID_FILE"
+        echo "locked"
+      else
+        do_unlock quiet
+        echo "free"
+      fi
+    else
+      echo "free"
+    fi
+    ;;
+  status)
+    if [[ -f $SUSPEND_FILE ]]; then echo "suspended"
+    elif [[ $(cat "$LOCK_FILE" 2>/dev/null) == "1" ]]; then echo "locked"
+    else echo "free"
+    fi
+    ;;
+  watch) do_watch ;;
+  *) echo "usage: $0 {lock|unlock|toggle|suspend|resume|status}" >&2; exit 2 ;;
+esac

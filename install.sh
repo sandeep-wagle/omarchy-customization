@@ -42,7 +42,9 @@ declare -a PAIRS=(
   "bin/omarchy-emulator-snap|${HOME}/.local/bin/omarchy-emulator-snap|apps"
   "bin/omarchy-emulator|${HOME}/.local/bin/omarchy-emulator|apps"
   "bin/omarchy-audio-output-volume|${HOME}/.local/bin/omarchy-audio-output-volume|apps"
+  "bin/omarchy-emulator-mouse|${HOME}/.local/bin/omarchy-emulator-mouse|apps"
   "ghostty/config|${HOME}/.config/ghostty/config|apps"
+  "src/pointer-warp.c|${HOME}/.local/src/omarchy-customization/pointer-warp.c|apps"
   "systemd/omarchy-crash-watch.service.d/override.conf|${HOME}/.config/systemd/user/omarchy-crash-watch.service.d/override.conf|apps"
   "bin/omarchy-window-snap|${HOME}/.local/bin/omarchy-window-snap|apps"
   "bin/omarchy-toggle-bar-mode|${HOME}/.local/bin/omarchy-toggle-bar-mode|apps"
@@ -203,6 +205,7 @@ apply() {
     "${HOME}/.local/bin/omarchy-switch" "${HOME}/.local/bin/omarchy-display-mode" \
     "${HOME}/.local/bin/omarchy-fullscreen-watch" "${HOME}/.local/bin/omarchy-emulator-snap" \
     "${HOME}/.local/bin/omarchy-emulator" \
+    "${HOME}/.local/bin/omarchy-emulator-mouse" \
     "${HOME}/.local/bin/omarchy-audio-output-volume" 2>/dev/null || true
   if [ "$changed" -gt 0 ]; then
     info "Reloading Hyprland config..."
