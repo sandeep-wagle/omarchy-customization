@@ -19,7 +19,17 @@ o.window({ class = "^omarchy\\.switch$" }, {
   animation = "popin 90%",
 })
 
--- Android Emulator / QEMU: PSEUDOTILED normal window (no fixed geometry).
+-- Android Emulator: ALWAYS floating (user call, 2026-10-01). The earlier
+-- pseudotile size-following rule is commented out below (kept for reference;
+-- delete it once floating proves right long-term). Super+T remains the
+-- manual float/tiling toggle (stock omarchy binding).
+o.window({ class = "^([Ee]mulator|qemu-system-x86_64)$" }, {
+  float = true,
+  center = true,
+})
+
+-- Android Emulator / QEMU pseudotile experiment (DISABLED 2026-10-01, see
+-- above -- emulator must always float now):
 --
 -- Pseudotile = tiled + keeps its own requested size; dwindle lays out all
 -- OTHER windows in the remaining space. That is exactly "size-following":
@@ -33,14 +43,14 @@ o.window({ class = "^omarchy\\.switch$" }, {
 -- phone is titled exactly "Emulator" like the toolbar; rules don't
 -- re-evaluate, so title rules cascade onto the wrong window). One
 -- class-wide rule, zero geometry numbers. The 54px toolbar auto-floats as a
--- Qt dialog and stays out of the tiling tree on its own.
-o.window({ class = "^([Ee]mulator|qemu-system-x86_64)$" }, {
-  pseudo = true,
-  no_blur = true,
-  no_shadow = true,
-  border_size = 0,
-  rounding = 20,
-})
+-- Qt dialog and stays out of the tiling grid on its own.
+-- o.window({ class = "^([Ee]mulator|qemu-system-x86_64)$" }, {
+--   pseudo = true,
+--   no_blur = true,
+--   no_shadow = true,
+--   border_size = 0,
+--   rounding = 20,
+-- })
 
 -- Small emulator helper toolbar / extended-controls dialog: keep floating,
 -- compact, and out of the tiling grid so it can dock flush beside the phone.

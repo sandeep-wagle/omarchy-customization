@@ -216,9 +216,14 @@ o.bind("ALT + XF86AudioLowerVolume", "Volume down precise", "/home/sandy/.local/
 -- the toggle lives on TAB instead. SUPER+X was the stock "Universal cut",
 -- unbound above. If a key name ever stops resolving, configerrors +
 -- `hyprctl binds` will show it -- adjust the spelling there first.
-o.bind("TAB", "Toggle emulator mouse capture", "/home/sandy/.local/bin/omarchy-emulator-mouse toggle bind", { locked = true })
-o.bind("SUPER + X", "Emulator mouse: hold to free pointer", "/home/sandy/.local/bin/omarchy-emulator-mouse suspend", { locked = true })
-o.bind("SUPER + X", "Emulator mouse: release to re-lock", "/home/sandy/.local/bin/omarchy-emulator-mouse resume", { locked = true, release = true })
+--
+-- DISABLED 2026-10-01 (Tab-storm bug: autonomous rapid Tab reported; these
+-- three binds are commented out until the root cause is proven fixed. The
+-- helper scripts stay installed under ~/.local/bin but nothing invokes
+-- them. CapsLock was already stock; SUPER+X returns to dead key.)
+-- o.bind("TAB", "Toggle emulator mouse capture", "/home/sandy/.local/bin/omarchy-emulator-mouse toggle bind", { locked = true })
+-- o.bind("SUPER + X", "Emulator mouse: hold to free pointer", "/home/sandy/.local/bin/omarchy-emulator-mouse suspend", { locked = true })
+-- o.bind("SUPER + X", "Emulator mouse: release to re-lock", "/home/sandy/.local/bin/omarchy-emulator-mouse resume", { locked = true, release = true })
 
 -- Ctrl+Shift+M = Toggle microphone mute (3-key combo)
 o.bind("CTRL + SHIFT + M", "Toggle microphone mute", "omarchy-audio-input-mute", { locked = true })
