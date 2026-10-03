@@ -42,8 +42,13 @@ declare -a PAIRS=(
   "bin/omarchy-emulator-snap|${HOME}/.local/bin/omarchy-emulator-snap|apps"
   "bin/omarchy-emulator|${HOME}/.local/bin/omarchy-emulator|apps"
   "bin/omarchy-audio-output-volume|${HOME}/.local/bin/omarchy-audio-output-volume|apps"
+  "bin/omarchy-audio-heal|${HOME}/.local/bin/omarchy-audio-heal|apps"
+  "systemd/omarchy-audio-heal.service|${HOME}/.config/systemd/user/omarchy-audio-heal.service|apps"
+  "systemd/omarchy-audio-heal.timer|${HOME}/.config/systemd/user/omarchy-audio-heal.timer|apps"
+  "wireplumber/wireplumber.conf.d/50-sof-dsp-crackle-fix.conf|${HOME}/.config/wireplumber/wireplumber.conf.d/50-sof-dsp-crackle-fix.conf|apps"
   "bin/omarchy-emulator-mouse|${HOME}/.local/bin/omarchy-emulator-mouse|apps"
   "ghostty/config|${HOME}/.config/ghostty/config|apps"
+  "emulator/freefire-HEY.map|${HOME}/.config/msi-center/freefire-HEY.map|apps"
   "src/pointer-warp.c|${HOME}/.local/src/omarchy-customization/pointer-warp.c|apps"
   "systemd/omarchy-crash-watch.service.d/override.conf|${HOME}/.config/systemd/user/omarchy-crash-watch.service.d/override.conf|apps"
   "bin/omarchy-window-snap|${HOME}/.local/bin/omarchy-window-snap|apps"
@@ -206,7 +211,8 @@ apply() {
     "${HOME}/.local/bin/omarchy-fullscreen-watch" "${HOME}/.local/bin/omarchy-emulator-snap" \
     "${HOME}/.local/bin/omarchy-emulator" \
     "${HOME}/.local/bin/omarchy-emulator-mouse" \
-    "${HOME}/.local/bin/omarchy-audio-output-volume" 2>/dev/null || true
+    "${HOME}/.local/bin/omarchy-audio-output-volume" \
+    "${HOME}/.local/bin/omarchy-audio-heal" 2>/dev/null || true
   if [ "$changed" -gt 0 ]; then
     info "Reloading Hyprland config..."
     hyprctl reload >/dev/null 2>&1 || true

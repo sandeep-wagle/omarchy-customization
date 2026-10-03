@@ -1,0 +1,11 @@
+[Unit]
+Description=Omarchy audio heal, every 2 hours (conditional, no-op when healthy)
+
+[Timer]
+# First check shortly after login, then every 2 hours while logged in.
+OnBootSec=15min
+OnUnitActiveSec=2h
+Unit=omarchy-audio-heal.service
+
+[Install]
+WantedBy=default.target

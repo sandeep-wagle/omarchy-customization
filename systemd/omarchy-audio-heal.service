@@ -1,0 +1,6 @@
+[Unit]
+Description=Omarchy audio heal (conditional restart on DSP crackle)
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/omarchy-audio-heal

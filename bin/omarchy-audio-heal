@@ -1,0 +1,74 @@
+#!/bin/bash
+# omarchy-audio-heal -- conditional audio-stack healer (the "auto fix").
+#
+# Why this exists: the MSI SOF DSP chain occasionally degrades into audible
+# crackle ("krr"): PipeWire logs `spa.audioconvert ... out of buffers` and
+# `spa.alsa: hw:sofhdadspp: ... resync`. A stack restart always clears it,
+# but blind periodic restarts would blip audio for no reason -- so this
+# restarts ONLY when the recent glitch count proves the stack is sick.
+#
+# What it does, in order:
+#   1. Counts glitch lines in the PipeWire journal over HEAL_WINDOW_MIN.
+#   2. Below threshold: logs the check, exits quiet (no blip, no notify).
+#   3. Above threshold + past cooldown: notifies, restarts
+#      pipewire + wireplumber + pipewire-pulse, records the heal.
+#   4. Above threshold but inside cooldown: logs and exits (a restart every
+#      few minutes would mean something is fundamentally broken -- the log
+#      says so instead of looping restarts forever).
+#
+# The MSI DSP chain re-latches by itself: msi-dsp.service (Restart=always)
+# watches for the missing msi_dsp_input node and rebuilds it, so no special
+# handling is needed here. Brief audio blip (~1-2s) on an actual heal.
+#
+# Tunables (env): HEAL_WINDOW_MIN=10 HEAL_THRESHOLD=20 HEAL_COOLDOWN_MIN=30
+# Driven by: omarchy-audio-heal.timer (every 2h) -- enable with
+#   systemctl --user enable --now omarchy-audio-heal.timer
+# Manual run: omarchy-audio-heal
+# History: $XDG_RUNTIME_DIR/omarchy-audio-heal/ (last_heal, checks.log)
+
+set -u
+
+WINDOW_MIN="${HEAL_WINDOW_MIN:-10}"
+THRESHOLD="${HEAL_THRESHOLD:-20}"
+COOLDOWN_MIN="${HEAL_COOLDOWN_MIN:-30}"
+
+STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/omarchy-audio-heal"
+LAST_HEAL="$STATE_DIR/last_heal"
+LOG="$STATE_DIR/checks.log"
+mkdir -p "$STATE_DIR" 2>/dev/null
+
+now=$(date +%s)
+log() {
+  printf '%s %s\n' "$(date '+%F %T')" "$1" >>"$LOG" 2>/dev/null
+  tail -n 100 "$LOG" 2>/dev/null >"$LOG.tmp" &&
+    mv "$LOG.tmp" "$LOG" 2>/dev/null || true
+}
+
+count=$(journalctl --user -u pipewire --since "$WINDOW_MIN min ago" 2>/dev/null |
+  grep -cE "out of buffers|resync|xrun|underrun|overrun" || true)
+
+if ((count <= THRESHOLD)); then
+  log "check ok: $count glitch lines in ${WINDOW_MIN}min (threshold $THRESHOLD)"
+  exit 0
+fi
+
+if [[ -f $LAST_HEAL ]]; then
+  last=$(cat "$LAST_HEAL" 2>/dev/null || echo 0)
+  age_min=$(((now - last) / 60))
+  if ((age_min < COOLDOWN_MIN)); then
+    log "SICK but cooling down: $count lines, last heal ${age_min}min ago (cooldown ${COOLDOWN_MIN}min) -- investigate, not restarting"
+    exit 0
+  fi
+fi
+
+log "HEALING: $count glitch lines in ${WINDOW_MIN}min > threshold $THRESHOLD -- restarting audio stack"
+if command -v omarchy-notification-send >/dev/null 2>&1; then
+  omarchy-notification-send -u normal "Audio" \
+    "Glitch detected (${count} in ${WINDOW_MIN}min) -- restarting audio…" 2>/dev/null || true
+fi
+
+systemctl --user restart pipewire wireplumber pipewire-pulse 2>&1 | head -3
+rc=$?
+printf '%s' "$now" >"$LAST_HEAL"
+log "heal done (restart rc=$rc); DSP chain re-latches via msi-dsp.service"
+exit "$rc"
