@@ -15,3 +15,15 @@ hl.monitor({ output = "eDP-1", mode = "1920x1080@144.42000", position = "1440x0"
 -- native removes that scaler AND raises the refresh 60 -> 75, so motion on
 -- the secondary is smoother and pixel-sharp 1:1 (scale 1).
 hl.monitor({ output = "HDMI-A-1", mode = "1280x1024@75.024675", position = "0x0", scale = 1 })
+
+-- KVM guest output. ONLY one rule for Virtual-1: two conflicting rules used
+-- to live here (1024x768@1 and 1920x1080@1.25) and the last one won, so the
+-- guest silently rendered 2400x1350.
+--
+-- scale = 1 on purpose. This guest has a QXL paravirtual adapter with no 3D
+-- acceleration, so Mesa falls back to llvmpipe and Hyprland rasterizes every
+-- frame on the CPU. A fractional scale multiplies the pixel count (1.25^2 =
+-- 1.56x) for a cost that llvmpipe cannot absorb, which showed up as laggy
+-- typing and a laggy pointer. At scale 1 the compositor moves ~44% fewer
+-- pixels. Raise to 1.25 only on a real GPU.
+hl.monitor({ output = "Virtual-1", mode = "1920x1080@60.00000", position = "0x0", scale = 1 })

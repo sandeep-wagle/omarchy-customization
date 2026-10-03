@@ -39,7 +39,6 @@ declare -a PAIRS=(
   "bin/omarchy-switch|${HOME}/.local/bin/omarchy-switch|apps"
   "bin/omarchy-display-mode|${HOME}/.local/bin/omarchy-display-mode|apps"
   "bin/omarchy-fullscreen-watch|${HOME}/.local/bin/omarchy-fullscreen-watch|apps"
-  "bin/omarchy-emulator-snap|${HOME}/.local/bin/omarchy-emulator-snap|apps"
   "bin/omarchy-emulator|${HOME}/.local/bin/omarchy-emulator|apps"
   "bin/omarchy-audio-output-volume|${HOME}/.local/bin/omarchy-audio-output-volume|apps"
   "bin/omarchy-audio-heal|${HOME}/.local/bin/omarchy-audio-heal|apps"
@@ -48,7 +47,6 @@ declare -a PAIRS=(
   "wireplumber/wireplumber.conf.d/50-sof-dsp-crackle-fix.conf|${HOME}/.config/wireplumber/wireplumber.conf.d/50-sof-dsp-crackle-fix.conf|apps"
   "bin/omarchy-emulator-mouse|${HOME}/.local/bin/omarchy-emulator-mouse|apps"
   "ghostty/config|${HOME}/.config/ghostty/config|apps"
-  "emulator/freefire-HEY.map|${HOME}/.config/msi-center/freefire-HEY.map|apps"
   "src/pointer-warp.c|${HOME}/.local/src/omarchy-customization/pointer-warp.c|apps"
   "systemd/omarchy-crash-watch.service.d/override.conf|${HOME}/.config/systemd/user/omarchy-crash-watch.service.d/override.conf|apps"
   "bin/omarchy-window-snap|${HOME}/.local/bin/omarchy-window-snap|apps"
@@ -208,8 +206,7 @@ apply() {
   chmod +x "${HOME}/.local/bin/mogtab" "${HOME}/.local/bin/mogtabctl" \
     "${HOME}/.local/bin/omarchy-window-snap" "${HOME}/.local/bin/omarchy-toggle-bar-mode" \
     "${HOME}/.local/bin/omarchy-switch" "${HOME}/.local/bin/omarchy-display-mode" \
-    "${HOME}/.local/bin/omarchy-fullscreen-watch" "${HOME}/.local/bin/omarchy-emulator-snap" \
-    "${HOME}/.local/bin/omarchy-emulator" \
+    "${HOME}/.local/bin/omarchy-fullscreen-watch"   "${HOME}/.local/bin/omarchy-emulator" \
     "${HOME}/.local/bin/omarchy-emulator-mouse" \
     "${HOME}/.local/bin/omarchy-audio-output-volume" \
     "${HOME}/.local/bin/omarchy-audio-heal" 2>/dev/null || true

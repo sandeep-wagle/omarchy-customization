@@ -11,6 +11,36 @@ development (the "phases" the configs still comment about) is summarized in the
 
 ### Fixed
 
+- **Duplicate `Virtual-1` monitor rule forced 2400x1350 software rendering**
+  (`hypr/monitors.lua`) — two conflicting rules for the KVM guest output
+  (1024x768@scale 1 and 1920x1080@scale 1.25); the last one won, so the guest
+  silently rendered 2400x1350. Collapsed to a single `1920x1080@60` rule at
+  `scale = 1`, which is ~44% fewer pixels for the compositor to rasterize.
+  Also adds the missing trailing newline that had let an appended rule get
+  glued onto the `HDMI-A-1` line.
+
+### Changed
+
+- **Open/close animations off** (`hypr/looknfeel.lua`) — the per-leaf
+  `windowsIn` / `windowsOut` fades are disabled. Each animated frame is a
+  compositing pass, which is affordable on a GPU but not on llvmpipe.
+  Re-enable on real GPU hardware.
+- **`dim_inactive` off** (`hypr/looknfeel.lua`) — dimming inactive windows
+  costs a full-screen render pass per frame. Focus remains visible via the
+  frameless single-window workspace rules.
+- **`direct_scanout` back on** (`hypr/looknfeel.lua`) — was forced to 0 on
+  2026-10-01 during an unreproduced fullscreen-video bug hunt. With it off,
+  every frame is copied through the swapchain instead of flipped straight to
+  the display; that copy is pure overhead under software rendering.
+
+### Removed
+
+- **Stale `install.sh` PAIRS entries** — `bin/omarchy-emulator-snap` and
+  `emulator/freefire-HEY.map` were listed but do not exist in the repo, so the
+  installer silently skipped them on every run.
+
+### Fixed
+
 - **Alt+Tab now opens instantly** (`bin/omarchy-switch`) — the screen
   capture/preview decode moved into a background thread that runs while the
   picker is being created, so the picker presents in ~0.3 s (was ~0.6 s) with
