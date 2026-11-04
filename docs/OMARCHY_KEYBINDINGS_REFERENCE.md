@@ -27,7 +27,8 @@ applications.
 | **Super + T** | Toggle floating/tiling | Standard tiling WM |
 | **Super + J** | Toggle split | |
 | **Super + O** | Pop window (float & pin) | |
-| **Super + P** | Pseudo window | |
+| **Super + P** | **Cycle display layout** | Custom (was Pseudo window) |
+| **Super + Shift + P** | **Display panel** | Custom (was Google Photos) |
 | **Super + S** | Toggle scratchpad | |
 | **Super + G** | Toggle window grouping | |
 | **Super + Esc** | System menu | |

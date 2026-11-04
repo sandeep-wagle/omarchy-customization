@@ -49,8 +49,10 @@ hl.unbind("SUPER + DOWN")
 -- Super+Shift+B for browser -> will replace with Super+B and Super+Shift+B for private
 hl.unbind("SUPER + SHIFT + B")
 
--- Super+P was "Pseudo window" in Omarchy defaults -> opens the Display panel
+-- Super+P was "Pseudo window" in Omarchy defaults -> cycles the display layout
 hl.unbind("SUPER + P")
+-- Super+Shift+P was the Google Photos webapp -> full Display panel
+hl.unbind("SUPER + SHIFT + P")
 
 -- Super+Ctrl+Left/Right for group focus -> replace with focus navigation
 hl.unbind("SUPER + CTRL + LEFT")
@@ -139,9 +141,15 @@ o.bind("ALT + SHIFT + ALT_L", "Close app switcher (alt+shift held)", "omarchy-sw
 o.bind("ALT + SHIFT + ALT_R", "Close app switcher (alt+shift held)", "omarchy-switch close --focus", _sw_close)
 
 -- ============================================================
--- DISPLAY PANEL (Super+P, replaces default Pseudo window)
+-- DISPLAY LAYOUT / PANEL (replaces default Pseudo window)
 -- ============================================================
-o.bind("SUPER + P", "Display panel", "omarchy-shell shell toggle com.sandy.display")
+-- Super+P = next layout. Keep Super held and tap P once per step; auto-repeat
+-- is deliberately off so holding P cannot race through every mode. With no
+-- external display the helper refuses every mode and notifies instead, so
+-- there is no way to strand the laptop on a dead output.
+o.bind("SUPER + P", "Cycle display layout", "omarchy-display-mode cycle")
+-- Super+Shift+P = full Display panel (rates, scale, per-monitor controls)
+o.bind("SUPER + SHIFT + P", "Display panel", "omarchy-shell shell toggle com.sandy.display")
 
 -- ============================================================
 -- SECURITY

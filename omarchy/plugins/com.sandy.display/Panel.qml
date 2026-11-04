@@ -37,6 +37,26 @@ Panel {
   // Raw `hyprctl monitors all -j` cache so refresh options recompute when
   // the display list lands (whichever proc finishes first wins).
   property string monitorsJsonCache: ""
+  // Raw state list cache so filtering can be redone when the physically
+  // connected set arrives.
+  property string displaysJsonCache: ""
+  // Outputs the kernel reports as physically connected (DRM status). `hyprctl
+  // monitors all` also lists disabled/stale outputs, so it cannot tell whether
+  // the HDMI is still plugged in.
+  property var connectedOutputs: []
+  // True only when a physically connected external output exists. LAYOUT and
+  // DISPLAYS stay hidden otherwise: extending to nothing is impossible, and
+  // applying "External only" with no external panel would leave a black screen.
+  readonly property bool externalConnected: {
+    if (displays.length <= 1 && connectedOutputs.length === 0) return false
+    if (connectedOutputs.length === 0) return displays.length > 1
+    for (var i = 0; i < displays.length; i++) {
+      var d = displays[i]
+      if (!d || !d.name || /^(eDP|LVDS|DSI)-/.test(d.name)) continue
+      if (connectedOutputs.indexOf(d.name) >= 0) return true
+    }
+    return false
+  }
 
   // Explicit configuration target. Set once from compositor focus when
   // the panel opens, then owned ONLY by DISPLAYS clicks afterwards.
@@ -79,7 +99,7 @@ Panel {
   //   "refresh"    - refresh-rate pills for the focused monitor; single
   //                  horizontal row like "scale" (only when 2+ rates exist).
   //   "layout"     - arrangement/presentation buttons; single horizontal
-  //                  row (only when 2+ displays are connected).
+  //                  row (only when a physically connected external exists).
   // Mouse hover on a target updates root state via the components' `hovered`
   // signal so keyboard cursor and pointer share one highlight.
   readonly property var scalePresets: ["1", "1.25", "1.6", "2", "3", "4"]
@@ -156,8 +176,8 @@ Panel {
     // look like it lacked the other control.
     if (selectedMonitor !== "") list.push("resolution")
     if (selectedMonitor !== "") list.push("refresh")
-    if (displays.length > 1) list.push("monitors")
-    if (displays.length > 1) list.push("layout")
+    if (externalConnected) list.push("monitors")
+    if (externalConnected) list.push("layout")
     return list
   }
 
@@ -320,6 +340,8 @@ Panel {
       refreshModes: root.monitorModes,
       resolutionModes: root.resolutionModes,
       activeLayout: root.activeLayout,
+      externalConnected: root.externalConnected,
+      connectedOutputs: root.connectedOutputs,
       gpuMode: root.gpuMode,
       displays: root.displays
     })
@@ -341,6 +363,7 @@ Panel {
   function refresh() {
     if (!stateProc.running) stateProc.running = true
     if (!modesProc.running) modesProc.running = true
+    if (!connectedProc.running) connectedProc.running = true
     if (!gpuProc.running) gpuProc.running = true
   }
 
@@ -423,9 +446,17 @@ Panel {
   }
 
   function updateDisplays(displaysJson) {
+    root.displaysJsonCache = String(displaysJson || "")
     var parsed = Model.parseDisplays(displaysJson)
-    root.displays = parsed.displays
-    root.enabledDisplayCount = parsed.enabledDisplayCount
+    // Drop stale/unplugged outputs so neither a ghost DISPLAYS row nor the
+    // LAYOUT section survives a cable pull. Internal is always kept; when the
+    // connected set is unknown, filterConnected() returns the list untouched.
+    root.displays = Model.filterConnected(parsed.displays, root.connectedOutputs)
+    var count = 0
+    for (var i = 0; i < root.displays.length; i++) {
+      if (root.displays[i] && root.displays[i].enabled) count++
+    }
+    root.enabledDisplayCount = count
   }
 
   function toggleDisplay(name, enabled) {
@@ -522,7 +553,7 @@ Panel {
       }
     }
     root.currentRefresh = rr
-    root.activeLayout = Model.detectLayout(monitorsJson)
+    root.activeLayout = Model.detectLayout(monitorsJson, root.connectedOutputs)
     root.resolutionModes = Model.parseResolutions(monitorsJson, selectedMonitor)
     // Adopt externally applied resolutions (other tools, lid events) so the
     // pills never describe a stale mode; a just-clicked pill already equals
@@ -555,8 +586,11 @@ Panel {
     }
   }
 
-  // ---- Layout / presentation (2+ displays, via omarchy-display-mode) ----
+  // ---- Layout / presentation (external required) ----
   function setLayout(mode) {
+    // Internal-only always works; every other mode needs a real external
+    // output. The helper re-checks this too (the panel can race a cable pull).
+    if (mode !== "internal-only" && !root.externalConnected) return
     actionProc.command = ["omarchy-display-mode", "layout", mode]
     if (!actionProc.running) actionProc.running = true
   }
@@ -712,6 +746,10 @@ Panel {
     clampCursor()
     if (monitorsJsonCache !== "") updateModes(monitorsJsonCache)
   }
+  onConnectedOutputsChanged: {
+    if (displaysJsonCache !== "") updateDisplays(displaysJsonCache)
+    if (monitorsJsonCache !== "") updateModes(monitorsJsonCache)
+  }
   onMonitorModesChanged: clampCursor()
   onResolutionModesChanged: clampCursor()
   onSelectedMonitorChanged: {
@@ -837,6 +875,20 @@ Panel {
     gpuMode = key === "igpu" ? "integrated" : key === "dgpu" ? "nvidia" : "hybrid"
     actionProc.command = ["omarchy-display-mode", "gpu-set", key]
     if (!actionProc.running) actionProc.running = true
+  }
+
+  // Physically connected outputs (kernel DRM), the source of truth for
+  // "is an external display attached?" — unlike `hyprctl monitors all`, which
+  // also keeps disabled and stale entries around after a cable pull.
+  Process {
+    id: connectedProc
+    command: ["omarchy-display-mode", "connected"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.connectedOutputs = Model.parseConnected(String(text || ""))
+      }
+    }
   }
 
   // Full `hyprctl monitors all -j` dump: feeds refresh-rate options and the
@@ -1451,14 +1503,14 @@ Panel {
 
           // ---------- Monitors ----------
           PanelSeparator {
-            visible: root.displays.length > 1
+            visible: root.externalConnected
             foreground: root.bar.foreground
           }
 
           Column {
             width: parent.width
             spacing: Style.space(10)
-            visible: root.displays.length > 1
+            visible: root.externalConnected
 
             PanelSectionHeader {
               text: "DISPLAYS"
@@ -1482,14 +1534,14 @@ Panel {
 
           // ---------- Layout / presentation ----------
           PanelSeparator {
-            visible: root.displays.length > 1
+            visible: root.externalConnected
             foreground: root.bar.foreground
           }
 
           Column {
             width: parent.width
             spacing: Style.space(10)
-            visible: root.displays.length > 1
+            visible: root.externalConnected
 
             PanelSectionHeader {
               text: "LAYOUT"
@@ -1642,6 +1694,10 @@ Panel {
     horizontalPadding: Style.spacing.sm
     verticalPadding: Style.spacing.controlPaddingY
     bordered: true
+    // No external output: only Internal only is meaningful. The whole LAYOUT
+    // section is hidden in that state; this guard covers racing transitions.
+    enabled: root.externalConnected || layoutKey === "internal-only"
+    opacity: enabled ? 1 : 0.4
 
     active: isActive
     hasCursor: root.cursorActive && root.focusSection === "layout" && root.selectedIndex === layoutIndex

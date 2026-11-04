@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""omarchy-display-watch — keep a laptop usable when the external screen goes.
+
+Hyprland reflows windows when an output disappears, but it keeps whatever
+per-output rules were last applied. If the user had picked "External only" (or
+an extend layout) and then pulled the HDMI cable, the internal panel can stay
+disabled and the machine looks dead.
+
+This daemon listens on Hyprland's socket2 for monitor events and runs
+`omarchy-display-mode fallback`, which re-enables the internal panel at the
+origin and disables stale external entries whenever no external output is
+physically connected. The helper is idempotent: while a real external is
+attached, fallback is a no-op.
+
+Single instance. Logs to ~/.local/state/omarchy/display-watch.log.
+"""
+
+import os
+import socket
+import subprocess
+import time
+from pathlib import Path
+
+HOME = os.path.expanduser("~")
+LOG = Path(HOME) / ".local" / "state" / "omarchy" / "display-watch.log"
+PIDFILE = Path(HOME) / ".local" / "state" / "omarchy" / "display-watch.pid"
+HELPER = Path(HOME) / ".local" / "bin" / "omarchy-display-mode"
+
+# Cable pull/plug emits several events (monitorremoved, configreloaded...).
+# Wait for the compositor to settle, then run the fallback once.
+DEBOUNCE_S = 0.6
+_last_run = 0.0
+
+
+def log(msg):
+    try:
+        LOG.parent.mkdir(parents=True, exist_ok=True)
+        if LOG.is_file() and LOG.stat().st_size > 200 * 1024:
+            LOG.unlink()
+        with open(LOG, "a") as f:
+            f.write(f"{time.strftime('%F %T')} {msg}\n")
+    except Exception:
+        pass
+
+
+def socket2_path():
+    sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")
+    rt = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    if sig:
+        p = Path(rt) / "hypr" / sig / ".socket2.sock"
+        if p.exists():
+            return str(p)
+    try:
+        cands = sorted(Path(rt, "hypr").glob("*/.socket2.sock"),
+                       key=lambda p: p.stat().st_mtime, reverse=True)
+        if cands:
+            return str(cands[0])
+    except Exception:
+        pass
+    return None
+
+
+def single_instance():
+    """Pidfile guard with a liveness check (same approach as
+    omarchy-fullscreen-watch: pgrep self-matching is unreliable)."""
+    try:
+        PIDFILE.parent.mkdir(parents=True, exist_ok=True)
+        if PIDFILE.is_file():
+            try:
+                old = int(PIDFILE.read_text().strip())
+            except ValueError:
+                old = 0
+            if old and old != os.getpid():
+                try:
+                    os.kill(old, 0)
+                    return False
+                except (ProcessLookupError, PermissionError):
+                    pass
+        PIDFILE.write_text(str(os.getpid()))
+    except Exception:
+        pass
+    return True
+
+
+def run_fallback(reason):
+    global _last_run
+    now = time.monotonic()
+    if now - _last_run < DEBOUNCE_S:
+        return
+    _last_run = now
+    helper = str(HELPER) if HELPER.is_file() else "omarchy-display-mode"
+    try:
+        res = subprocess.run([helper, "fallback"],
+                             capture_output=True, timeout=15)
+        out = res.stdout.decode("utf-8", "replace").strip()
+        log(f"{reason}: rc={res.returncode} {out}".strip())
+    except Exception as e:
+        log(f"{reason}: {e!r}")
+
+
+def main():
+    if not single_instance():
+        print("display-watch already running")
+        return 0
+    log("started")
+    # Catch the state left by a disconnect that happened before startup.
+    run_fallback("startup")
+    while True:
+        sock = socket2_path()
+        if not sock:
+            log("no socket2; retrying")
+            time.sleep(5)
+            continue
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(30)
+            s.connect(sock)
+            buf = b""
+            while True:
+                try:
+                    chunk = s.recv(4096)
+                except socket.timeout:
+                    continue
+                if not chunk:
+                    break
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    ev = line.decode("utf-8", "replace").strip()
+                    if (ev.startswith("monitorremoved>>")
+                            or ev.startswith("monitoradded>>")
+                            or ev.startswith("monitoraddedv2>>")
+                            or ev.startswith("configreloaded>>")):
+                        run_fallback(ev.split(">>", 1)[0])
+        except Exception as e:
+            log(f"socket loop: {e!r}")
+        time.sleep(2.0)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

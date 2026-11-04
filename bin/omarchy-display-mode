@@ -12,6 +12,9 @@
 #   omarchy-display-mode layout <MODE>           # extend-right|extend-left|
 #                                                # extend-above|extend-below|
 #                                                # mirror|internal-only|external-only
+#   omarchy-display-mode cycle                   # next layout (Super+P)
+#   omarchy-display-mode fallback                # internal-only if no external
+#   omarchy-display-mode connected               # physically connected outputs
 #   omarchy-display-mode rates <OUTPUT>          # list "WxH@RRHz" modes for output
 #   omarchy-display-mode resolutions <OUTPUT>    # list "WxH (aspect)" modes for output
 #   omarchy-display-mode gpu                     # print integrated|hybrid|nvidia|dedicated|unknown
@@ -25,6 +28,9 @@ usage() {
 Usage:
   omarchy-display-mode refresh <OUTPUT> <HZ>
   omarchy-display-mode layout <extend-right|extend-left|extend-above|extend-below|mirror|internal-only|external-only>
+  omarchy-display-mode cycle
+  omarchy-display-mode fallback
+  omarchy-display-mode connected
   omarchy-display-mode rates <OUTPUT>
 EOF
 }
@@ -33,12 +39,48 @@ monitors_json() {
   hyprctl monitors all -j 2>/dev/null
 }
 
-# Echo "<internal> <external>" (first non-internal output), like omarchy-monitor-state.
+# Outputs the kernel reports as physically connected. `hyprctl monitors all`
+# also lists DISABLED and STALE outputs, so it cannot answer "is the HDMI still
+# plugged in?" — the DRM status file can.
+physically_connected() {
+  local f name
+  for f in /sys/class/drm/card*-*/status; do
+    [ -r "$f" ] || continue
+    [ "$(cat "$f" 2>/dev/null)" = "connected" ] || continue
+    name="$(basename "$(dirname "$f")")"
+    name="${name#card[0-9]*-}"
+    printf '%s\n' "$name"
+  done
+}
+
+drm_available() {
+  local f
+  for f in /sys/class/drm/card*-*/status; do
+    [ -r "$f" ] && return 0
+  done
+  return 1
+}
+
+# Echo "<internal> <external>". The external is the first non-internal output
+# that is PHYSICALLY connected; when DRM info is unavailable, fall back to the
+# old behaviour (first non-internal entry in Hyprland's list).
 internal_external() {
   local j="$1"
-  local internal external
+  local internal external name connected
   internal="$(echo "$j" | jq -r '[.[] | select(.name | test("^(eDP|LVDS|DSI)-"))][0].name // ""')"
-  external="$(echo "$j" | jq -r '[.[] | select((.name | test("^(eDP|LVDS|DSI)-")) | not)][0].name // ""')"
+  external=""
+  connected="$(physically_connected)"
+  if [ -n "$connected" ]; then
+    while IFS= read -r name; do
+      [ -n "$name" ] || continue
+      if printf '%s\n' "$connected" | grep -qx -- "$name"; then
+        external="$name"
+        break
+      fi
+    done < <(echo "$j" | jq -r '.[] | select((.name | test("^(eDP|LVDS|DSI)-")) | not) | .name')
+  else
+    external="$(echo "$j" | jq -r '[.[] | select((.name | test("^(eDP|LVDS|DSI)-")) | not)][0].name // ""')"
+  fi
   printf '%s %s\n' "$internal" "$external"
 }
 
@@ -193,63 +235,215 @@ cmd_scale() {
   echo "ok $output scale $new_scale"
 }
 
+# Apply and persist one complete monitor rule. `disabled = false` is explicit:
+# after a previous disable, a rule without the field can leave the output off.
+apply_monitor() { # output mode position scale [extra-fields...]
+  local o="$1" m="$2" p="$3" s="$4" extra="${5:-}"
+  local fields="mode = \"$m\", position = \"$p\", scale = $s, disabled = false"
+  [ -n "$extra" ] && fields="$fields, $extra"
+  hyprctl eval "hl.monitor({ output = \"$o\", $fields })" >/dev/null
+  persist_rule "$o" "hl.monitor({ output = \"$o\", $fields })"
+}
+
+disable_output() { # output
+  local o="$1"
+  hyprctl eval "hl.monitor({ output = \"$o\", disabled = true })" >/dev/null
+  persist_rule "$o" "hl.monitor({ output = \"$o\", disabled = true })"
+}
+
+logical_size() { # monitor-json -> "w h" in logical (layout) pixels
+  echo "$1" | jq -r '"\((.width / .scale) | round) \((.height / .scale) | round)"'
+}
+
 cmd_layout() {
   local mode="$1"
   local j internal external
   j="$(monitors_json)"
   read -r internal external <<<"$(internal_external "$j")"
-  if [ -z "$internal" ] || [ -z "$external" ]; then
-    echo "Need internal + external outputs for layout mode (have: '$internal' '$external')" >&2
+  if [ -z "$internal" ]; then
+    echo "No internal display found; refusing layout change" >&2
     exit 1
   fi
-  valid_name "$internal" && valid_name "$external" || { echo "Refusing unsafe monitor name" >&2; exit 1; }
+  if [ "$mode" != "internal-only" ] && [ -z "$external" ]; then
+    echo "No external display connected; refusing $mode" >&2
+    exit 1
+  fi
+  valid_name "$internal" || { echo "Refusing unsafe monitor name" >&2; exit 1; }
+  if [ -n "$external" ]; then
+    valid_name "$external" || { echo "Refusing unsafe monitor name" >&2; exit 1; }
+  fi
 
-  local info mode_str scale pos_int pos_ext extra_ext
-  info_of() { echo "$j" | jq -e -c --arg o "$1" '.[] | select(.name == $o)'; }
-  local int_info ext_info
-  int_info="$(info_of "$internal")"
-  ext_info="$(info_of "$external")"
-
-  apply() { # output mode position scale [extra-fields...]
-    local o="$1" m="$2" p="$3" s="$4" extra="${5:-}"
-    if [ -n "$extra" ]; then
-      hyprctl eval "hl.monitor({ output = \"$o\", mode = \"$m\", position = \"$p\", scale = $s, $extra })" >/dev/null
-      persist_rule "$o" "hl.monitor({ output = \"$o\", mode = \"$m\", position = \"$p\", scale = $s, $extra })"
-    else
-      hyprctl eval "hl.monitor({ output = \"$o\", mode = \"$m\", position = \"$p\", scale = $s })" >/dev/null
-      persist_rule "$o" "hl.monitor({ output = \"$o\", mode = \"$m\", position = \"$p\", scale = $s })"
-    fi
-  }
-
+  local int_info ext_info int_mode int_scale ext_mode ext_scale
+  int_info="$(echo "$j" | jq -e -c --arg o "$internal" '.[] | select(.name == $o)')"
   int_mode="$(echo "$int_info" | jq -r '"\(.width)x\(.height)@\(.refreshRate)"')"
   int_scale="$(echo "$int_info" | jq -r '.scale')"
-  ext_mode="$(echo "$ext_info" | jq -r '"\(.width)x\(.height)@\(.refreshRate)"')"
-  ext_scale="$(echo "$ext_info" | jq -r '.scale')"
+  if [ -n "$external" ]; then
+    ext_info="$(echo "$j" | jq -e -c --arg o "$external" '.[] | select(.name == $o)')"
+    ext_mode="$(echo "$ext_info" | jq -r '"\(.width)x\(.height)@\(.refreshRate)"')"
+    ext_scale="$(echo "$ext_info" | jq -r '.scale')"
+  fi
 
+  local int_w int_h ext_w ext_h
+  read -r int_w int_h <<<"$(logical_size "$int_info")"
+  [ -n "$external" ] && read -r ext_w ext_h <<<"$(logical_size "$ext_info")"
+
+  local pos_int pos_ext extra_ext=""
   case "$mode" in
-    extend-right) pos_int="0x0"; pos_ext="auto-right"; extra_ext="" ;;
-    extend-left) pos_int="auto-right"; pos_ext="0x0"; extra_ext="" ;;
-    extend-above) pos_int="auto-down"; pos_ext="0x0"; extra_ext="" ;;
-    extend-below) pos_int="0x0"; pos_ext="auto-down"; extra_ext="" ;;
+    extend-right) pos_int="0x0"; pos_ext="${int_w}x0" ;;
+    extend-left) pos_int="${ext_w}x0"; pos_ext="0x0" ;;
+    extend-above) pos_int="0x${ext_h}"; pos_ext="0x0" ;;
+    extend-below) pos_int="0x0"; pos_ext="0x${int_h}" ;;
     mirror) pos_int="0x0"; pos_ext="0x0"; extra_ext="mirror = \"$internal\"" ;;
     internal-only)
-      apply "$internal" "$int_mode" "0x0" "$int_scale"
-      hyprctl eval "hl.monitor({ output = \"$external\", disabled = true })" >/dev/null
-      persist_rule "$external" "hl.monitor({ output = \"$external\", disabled = true })"
+      apply_monitor "$internal" "$int_mode" "0x0" "$int_scale"
+      [ -n "$external" ] && disable_output "$external"
       echo "ok internal-only"; return 0 ;;
     external-only)
-      apply "$external" "$ext_mode" "0x0" "$ext_scale"
-      hyprctl eval "hl.monitor({ output = \"$internal\", disabled = true })" >/dev/null
-      persist_rule "$internal" "hl.monitor({ output = \"$internal\", disabled = true })"
+      apply_monitor "$external" "$ext_mode" "0x0" "$ext_scale"
+      disable_output "$internal"
       echo "ok external-only"; return 0 ;;
     *) echo "Unknown layout: $mode" >&2; usage >&2; exit 1 ;;
   esac
 
-  # Re-enabling (a side may be disabled): a full rule replaces the
-  # `disabled = true` line, which re-enables the output.
-  apply "$internal" "$int_mode" "$pos_int" "$int_scale"
-  apply "$external" "$ext_mode" "$pos_ext" "$ext_scale" "$extra_ext"
+  apply_monitor "$internal" "$int_mode" "$pos_int" "$int_scale"
+  apply_monitor "$external" "$ext_mode" "$pos_ext" "$ext_scale" "$extra_ext"
   echo "ok $mode"
+}
+
+# Current arrangement, using the same rules as Model.detectLayout. Empty when
+# undeterminable (no internal, or both outputs disabled).
+current_layout() {
+  local j="$1" internal external
+  local idis edis dx dy mirror_of
+  read -r internal external <<<"$(internal_external "$j")"
+  [ -n "$internal" ] || { echo ""; return 0; }
+
+  idis="$(echo "$j" | jq -r --arg o "$internal" '.[] | select(.name == $o) | (.disabled == true)')"
+  if [ -z "$external" ]; then
+    if [ "$idis" = "true" ]; then echo ""; else echo "internal-only"; fi
+    return 0
+  fi
+  edis="$(echo "$j" | jq -r --arg o "$external" '.[] | select(.name == $o) | (.disabled == true)')"
+  if [ "$edis" = "true" ] && [ "$idis" != "true" ]; then echo "internal-only"; return 0; fi
+  if [ "$idis" = "true" ] && [ "$edis" != "true" ]; then echo "external-only"; return 0; fi
+  if [ "$idis" = "true" ] && [ "$edis" = "true" ]; then echo ""; return 0; fi
+
+  mirror_of="$(echo "$j" | jq -r --arg i "$internal" --arg e "$external" \
+    '[.[] | select((.name == $i or .name == $e) and .mirrorOf != "none")][0].mirrorOf // "none"')"
+  [ "$mirror_of" != "none" ] && { echo "mirror"; return 0; }
+
+  read -r dx dy < <(echo "$j" | jq -r --arg i "$internal" --arg e "$external" '
+    ([.[] | select(.name == $e)][0]) as $ext
+    | ([.[] | select(.name == $i)][0]) as $int
+    | "\(($ext.x - $int.x)) \(($ext.y - $int.y))"')
+  if [ "$dx" -gt 0 ] 2>/dev/null; then echo "extend-right"; return 0; fi
+  if [ "$dx" -lt 0 ] 2>/dev/null; then echo "extend-left"; return 0; fi
+  if [ "$dy" -lt 0 ] 2>/dev/null; then echo "extend-above"; return 0; fi
+  if [ "$dy" -gt 0 ] 2>/dev/null; then echo "extend-below"; return 0; fi
+  echo ""
+}
+
+layout_label() {
+  case "$1" in
+    extend-right) echo "Extend right" ;;
+    extend-left) echo "Extend left" ;;
+    extend-above) echo "Extend above" ;;
+    extend-below) echo "Extend below" ;;
+    mirror) echo "Mirror" ;;
+    internal-only) echo "Internal only" ;;
+    external-only) echo "External only" ;;
+    *) echo "$1" ;;
+  esac
+}
+
+notify_layout() {
+  notify-send -u low -h string:x-canonical-private-synchronous:display-layout \
+    "Display" "$1" 2>/dev/null || true
+}
+
+# Super+P: walk the layout list. Serialised so rapid keypresses apply in
+# order instead of racing each other and repeating the same mode.
+cmd_cycle() {
+  local lock="${XDG_RUNTIME_DIR:-/tmp}/omarchy-display-cycle.lock"
+  if command -v flock >/dev/null 2>&1; then
+    exec 9>"$lock" 2>/dev/null || true
+    flock -w 3 9 2>/dev/null || return 0
+  fi
+
+  local j internal external cur next i
+  local order=(extend-right extend-left extend-above extend-below mirror internal-only external-only)
+  j="$(monitors_json)"
+  read -r internal external <<<"$(internal_external "$j")"
+  if [ -z "$external" ]; then
+    cmd_fallback
+    notify_layout "No external display connected"
+    return 0
+  fi
+
+  cur="$(current_layout "$j")"
+  next="${order[0]}"
+  if [ -n "$cur" ]; then
+    for i in "${!order[@]}"; do
+      if [ "${order[$i]}" = "$cur" ]; then
+        next="${order[$(( (i + 1) % ${#order[@]} ))]}"
+        break
+      fi
+    done
+  fi
+  if cmd_layout "$next" >/dev/null 2>&1; then
+    notify_layout "Layout: $(layout_label "$next")"
+  fi
+}
+
+# Safety net for unplugging: when no external output is physically connected,
+# re-enable the internal panel at the origin and disable stale externals. This
+# is what stops an "External only" selection from leaving a black screen.
+cmd_fallback() {
+  local j internal external idis x y o stale_enabled
+  j="$(monitors_json)"
+  [ -n "$j" ] || return 0
+  read -r internal external <<<"$(internal_external "$j")"
+  [ -n "$internal" ] || return 0
+  [ -z "$external" ] || return 0
+
+  idis="$(echo "$j" | jq -r --arg o "$internal" '.[] | select(.name == $o) | (.disabled == true)')"
+  x="$(echo "$j" | jq -r --arg o "$internal" '.[] | select(.name == $o) | .x')"
+  y="$(echo "$j" | jq -r --arg o "$internal" '.[] | select(.name == $o) | .y')"
+
+  # A disconnected output can linger in `monitors all` as ENABLED; its old
+  # position is what produces the "monitor overlaps" warning. Treat that as
+  # unsafe too, even when the internal panel already looks fine.
+  stale_enabled=""
+  if drm_available; then
+    while IFS= read -r o; do
+      [ -n "$o" ] || continue
+      physically_connected | grep -qx -- "$o" && continue
+      if [ "$(echo "$j" | jq -r --arg o "$o" '.[] | select(.name == $o) | (.disabled == true)')" != "true" ]; then
+        stale_enabled="$o"
+      fi
+    done < <(echo "$j" | jq -r '.[] | select((.name | test("^(eDP|LVDS|DSI)-")) | not) | .name')
+  fi
+
+  if [ "$idis" != "true" ] && [ "$x" = "0" ] && [ "$y" = "0" ] && [ -z "$stale_enabled" ]; then
+    return 0  # already safe: internal enabled at the origin, no ghost output
+  fi
+
+  cmd_layout internal-only >/dev/null 2>&1 || return 0
+
+  # Disable every listed external that is no longer physically connected so
+  # its stale position cannot overlap the internal panel.
+  if drm_available; then
+    while IFS= read -r o; do
+      [ -n "$o" ] || continue
+      physically_connected | grep -qx -- "$o" && continue
+      disable_output "$o"
+    done < <(echo "$j" | jq -r '.[] | select((.name | test("^(eDP|LVDS|DSI)-")) | not) | .name')
+  fi
+  notify_layout "External display removed. Switched to Internal only."
+}
+
+cmd_connected() {
+  physically_connected
 }
 
 # ---- GPU mode (supergfxctl preferred, envycontrol fallback) ----
@@ -314,6 +508,9 @@ case "${1:-}" in
   resolution) [ $# -eq 3 ] || { usage >&2; exit 1; }; cmd_resolution "$2" "$3" ;;
   scale) [ $# -eq 3 ] || { usage >&2; exit 1; }; cmd_scale "$2" "$3" ;;
   layout) [ $# -eq 2 ] || { usage >&2; exit 1; }; cmd_layout "$2" ;;
+  cycle) cmd_cycle ;;
+  fallback) cmd_fallback ;;
+  connected) cmd_connected ;;
   rates) [ $# -eq 2 ] || { usage >&2; exit 1; }; cmd_rates "$2" ;;
   resolutions) [ $# -eq 2 ] || { usage >&2; exit 1; }; cmd_resolutions "$2" ;;
   gpu) cmd_gpu ;;

@@ -38,6 +38,7 @@ declare -a PAIRS=(
   "bin/mogtabctl|${HOME}/.local/bin/mogtabctl|apps"
   "bin/omarchy-switch|${HOME}/.local/bin/omarchy-switch|apps"
   "bin/omarchy-display-mode|${HOME}/.local/bin/omarchy-display-mode|apps"
+  "bin/omarchy-display-watch|${HOME}/.local/bin/omarchy-display-watch|apps"
   "bin/omarchy-fullscreen-watch|${HOME}/.local/bin/omarchy-fullscreen-watch|apps"
   "bin/omarchy-emulator|${HOME}/.local/bin/omarchy-emulator|apps"
   "bin/omarchy-audio-output-volume|${HOME}/.local/bin/omarchy-audio-output-volume|apps"

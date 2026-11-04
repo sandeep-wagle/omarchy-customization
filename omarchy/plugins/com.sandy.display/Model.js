@@ -130,6 +130,33 @@ function parseDisplays(raw) {
   }
 }
 
+// Parse `omarchy-display-mode connected` output (one output name per line).
+// Never throws; malformed lines are dropped.
+function parseConnected(raw) {
+  var names = String(raw || "").split("\n")
+  var out = []
+  for (var i = 0; i < names.length; i++) {
+    var name = names[i].trim()
+    if (/^[A-Za-z0-9._-]+$/.test(name)) out.push(name)
+  }
+  return out
+}
+
+// Keep the internal panel plus only outputs the kernel reports as physically
+// connected. `hyprctl monitors all` also lists disabled and stale outputs, and
+// a stale HDMI row is what let the LAYOUT controls appear with no monitor
+// plugged in. When the connected list is empty (DRM unreadable), trust the
+// monitor list so real controls are never hidden by mistake.
+function filterConnected(displays, connected) {
+  if (!Array.isArray(displays)) return []
+  if (!Array.isArray(connected) || connected.length === 0) return displays
+  return displays.filter(function (d) {
+    if (!d || !d.name) return false
+    if (/^(eDP|LVDS|DSI)-/.test(d.name)) return true
+    return connected.indexOf(d.name) >= 0
+  })
+}
+
 // Reduced aspect-ratio label for WxH. Common marketing names first
 // (64:27 and 43:18 panels are both sold as 21:9); anything else falls
 // back to the reduced ratio itself.
@@ -250,10 +277,14 @@ function parseRefreshRates(monitorsJson, outputName, width, height) {
 
 // Detect the current layout/presentation mode from `hyprctl monitors all -j`:
 // extend-right | extend-left | extend-above | extend-below | mirror |
-// internal-only | external-only, or "" when undeterminable (single display,
-// both sides disabled, ambiguous overlap). Mirrors the detection in
+// internal-only | external-only, or "" when undeterminable (both sides
+// disabled, ambiguous overlap). Mirrors the detection in
 // bin/omarchy-display-mode.
-function detectLayout(monitorsJson) {
+//
+// `connected` (optional) is the list from `omarchy-display-mode connected`.
+// It excludes stale/disabled external entries, so a disconnected HDMI cannot
+// masquerade as a second display.
+function detectLayout(monitorsJson, connected) {
   var monitors = []
   try {
     monitors = monitorsJson ? JSON.parse(String(monitorsJson)) : []
@@ -262,13 +293,23 @@ function detectLayout(monitorsJson) {
   }
   if (!Array.isArray(monitors)) return ""
 
+  var known = Array.isArray(connected) ? connected : []
+  function isConnected(name) {
+    if (known.length === 0) return true
+    return known.indexOf(name) >= 0
+  }
+
   var internal = null, external = null
   for (var i = 0; i < monitors.length; i++) {
     var m = monitors[i]
     if (!m || !m.name) continue
     if (/^(eDP|LVDS|DSI)-/.test(m.name)) { if (!internal) internal = m }
-    else if (!external) external = m
+    else if (!external && isConnected(m.name)) external = m
   }
+  // Single display (or external unplugged): the only meaningful mode is the
+  // internal panel. This is also the fallback state after a disconnect.
+  if (internal && !external)
+    return internal.disabled === true ? "" : "internal-only"
   if (!internal || !external) return ""
 
   var intDis = internal.disabled === true
@@ -315,6 +356,8 @@ if (typeof module !== "undefined") {
     availableScales: availableScales,
     brightnessName: brightnessName,
     parseDisplays: parseDisplays,
+    parseConnected: parseConnected,
+    filterConnected: filterConnected,
     parseRefreshRates: parseRefreshRates,
     matchingRefreshIndex: matchingRefreshIndex,
     aspectFor: aspectFor,
