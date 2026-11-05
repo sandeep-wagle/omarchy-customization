@@ -4,11 +4,11 @@
 # omarchy:args=<raise|lower|mute-toggle|+N|-N>
 # omarchy:examples=omarchy audio output volume raise | omarchy audio output volume lower | omarchy audio output volume +1
 #
-# *** MSI CENTER TEMPERED BUILD (user shadow of /usr/share/omarchy/bin/omarchy-audio-output-volume) ***
-# Display <-> real mapping shared with MSI Controller (single contract):
-#   display 0-100  <-->  real 0-150  (real = 1.5 * display)
-# The OSD always shows DISPLAY values and steps in display space; only the
-# value written to the sink is tempered. True mute travels via mute-toggle.
+# *** DIRECT-VOLUME BUILD (user shadow of /usr/share/omarchy/bin/omarchy-audio-output-volume) ***
+# Display and real volume use the same 0-150% scale. The old 0-100 display /
+# 0-150 real temper is gone: a physical sink caps at 100% real, but the UI now
+# shows the full 0-150 range so key presses can raise volume beyond 100% (useful
+# with DSP gain). Clamp to 0-150 after each step.
 #
 # SINGLE-KNOB DIFFERENCE vs upstream: this shadow drives the *default* sink
 # itself (msi_dsp_input while the DSP chain runs, the physical sink
@@ -48,22 +48,13 @@ volume_muted() {
   [[ $(pactl get-sink-mute "$sink" 2>/dev/null) == *yes ]]
 }
 
-# MSI temper helpers (integer percent units): display 0-100 <-> real 0-150.
-# NOTE: assignments split across lines — `local a=$1 b=$((a-40))` would
-# expand b before a is assigned.
+# Display and real are the same scale: clamp to 0-150.
 to_display() {
   local real=$1
-  local d=$((real * 2 / 3))
+  local d=$real
   ((d < 0)) && d=0
-  ((d > 100)) && d=100
+  ((d > 150)) && d=150
   printf '%s\n' "$d"
-}
-
-to_real() {
-  local display=$1
-  ((display < 0)) && display=0
-  ((display > 100)) && display=100
-  printf '%s\n' "$((display + display / 2))"
 }
 
 case "$action" in
@@ -90,12 +81,10 @@ elif [[ $action =~ ^([+-])([0-9]+)$ ]]; then
 
   # ATOMIC server-side step (no read-modify-write race between overlapping
   # key-repeat invocations — that race swallowed steps and stuck the UI).
-  # Deltas scale by 1.5x in real terms; relative steps stay atomic
-  # (no read-modify-write races), bounds enforced after.
   pactl set-sink-mute "$sink" 0
   pactl set-sink-volume "$sink" "${direction}${step}%"
 
-  # Clamp real into the temper band (display 0-100 <-> real 0-150).
+  # Clamp into the shared 0-150 scale.
   current="$(volume_percent)"
   if [[ -n $current ]]; then
     if ((current > 150)); then
@@ -122,7 +111,7 @@ else
   # pre-mute level survives a restart (mute itself is a boolean in the
   # graph, restored separately).
   mkdir -p "${HOME}/.config/msi-center" 2>/dev/null
-  awk -v d="${display:-0}" 'BEGIN{printf "%.4f", d/100}' \
+  awk -v d="${display:-0}" 'BEGIN{printf "%.4f", d/150}' \
     > "${HOME}/.config/msi-center/msi-volume" 2>/dev/null || true
 fi
 

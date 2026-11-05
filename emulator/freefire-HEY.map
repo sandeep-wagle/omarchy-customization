@@ -1,0 +1,43 @@
+# Free Fire keymap 'HEY' exported from BlueStacks cfg (Downloads/com.dts.freefireth.cfg).
+# Units: PERCENT of the landscape game view. Daemon scales % -> 0-32767
+# touch range (rotation-independent: the MT frame maps 1:1 to the display).
+# Format: TAP <HostKey> <X%> <Y%> | DPAD <X%> <Y%> <R%> <Up> <Dn> <Lf> <Rt> | FIRE <X%> <Y%>
+# Hand-tuned notes: G favors Interact over the duplicate pickup tap; the
+# Shift 'sprint tap' is dropped (sprint = full-deflection Dpad drag, not a tap).
+
+DPAD 16.77 75.51 8.11 W S A D
+# PAN look sens=2.93 (in-game sensitivity covers this; our drag is 1:1)
+FIRE 79.24 78.98 # host LMB -> fire button (hold-capable)
+TAP H 88.11 32.85 # Basic controls/Pick up items
+# DUP key=G @92.99,33.99 (Basic controls/Pick up items) -- skipped, keeping Interact
+TAP G 71.57 51.08 # Basic controls/Interact
+TAP MouseRButton 96.21 54.05 # Combat/Use scope
+TAP 1 86.00 18.87 # Combat/Change weapon
+TAP 2 91.40 19.56 # Combat/Change weapon
+TAP 3 98.09 19.68 # Combat/Change weapon
+TAP 6 3.02 75.81 # Combat/Grenade
+TAP R 98.38 4.16 # Combat/Reload
+# SKIP Shift tap @16.73,43.55 (sprint = Dpad full deflection)
+TAP space 97.55 70.79 # Movement/Jump (XKB keysym is lowercase)
+TAP C 94.25 90.03 # Movement/Crouch
+TAP Z 82.46 92.47 # Movement/Prone
+# DUP key=G @71.37,62.54 (General/?) -- skipped, keeping Interact
+TAP 5 3.12 62.90 # General/Healing
+# TAB/backpack is intentionally unmapped: bare TAB is the capture toggle
+# (compositor consumes it, the game never sees it). Open the backpack
+# unlocked via Super+X peek, or tap its on-screen button.
+TAP M 8.96 14.91 # General/Map
+# DUP key=G @62.74,50.35 (General/Interact) ALSO @71.57,51.08 -- skipped
+TAP B 54.94 67.49 # General/Revive
+TAP T 18.43 3.49 # General/Mic
+TAP Y 18.39 10.88 # General/Sound
+# DUP key=G @78.17,47.78 (Driving/?) -- skipped, keeping Interact
+TAP V 79.04 11.15 # ?/?
+TAP 4 50.08 68.58 # ?/?
+TAP E 74.53 92.60 # ?/?
+TAP Q 96.85 44.44 # ?/?
+# DUP key=R @93.65,8.35 (?/?) ALSO @98.38,4.16 -- skipped
+# DUP key=G @40.73,68.80 (?/?) -- skipped, keeping Interact
+TAP grave 30.89 94.92 # ?/? (cfg Oem3 = backtick)
+TAP F 59.92 68.24 # ?/?
+# DUP key=V @96.29,33.38 (?/?) ALSO @79.04,11.15 -- skipped

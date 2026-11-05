@@ -1,0 +1,13 @@
+[Unit]
+Description=Omarchy headphone/speaker auto-switch
+After=pipewire.service wireplumber.service pipewire-pulse.service
+Wants=pipewire.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/omarchy-headphone-switch
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

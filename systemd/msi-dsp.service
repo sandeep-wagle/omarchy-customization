@@ -1,0 +1,18 @@
+[Unit]
+Description=MSI DSP Service (PipeWire audio processing for MSI Center)
+After=pipewire.service pipewire-pulse.service wireplumber.service
+Wants=pipewire.service
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+# Stable path: the Cargo target/ dir vanishes on `cargo clean`, which would
+# leave this unit pointing at nothing. The release binary is (re)installed
+# to ~/.local/bin on every service update (see install-all.sh step 4).
+ExecStart=%h/.local/bin/msi_dsp_service
+Restart=on-failure
+RestartSec=3
+Nice=-5
+
+[Install]
+WantedBy=default.target

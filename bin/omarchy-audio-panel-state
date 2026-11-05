@@ -1,0 +1,40 @@
+#!/bin/bash
+# omarchy-audio-panel-state -- tiny key=value store for the audio panel.
+# Usage: omarchy-audio-panel-state get <key> | set <key> <value> | all
+set -uo pipefail
+
+FILE="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/audio-panel-state"
+cmd="${1:-get}"
+
+case "$cmd" in
+  get)
+    key="${2:-}"
+    [[ -f $FILE ]] || exit 0
+    awk -F= -v k="$key" '$1 == k { sub(/^[^=]*=/, ""); print; exit }' "$FILE"
+    ;;
+  set)
+    key="${2:-}"
+    val="${3:-}"
+    [[ -n $key ]] || exit 1
+    mkdir -p "$(dirname "$FILE")"
+    tmp="$(mktemp)"
+    if [[ -f $FILE ]]; then
+      awk -F= -v k="$key" -v v="$val" '
+        BEGIN { done = 0 }
+        $1 == k { if (!done) { print k "=" v; done = 1 }; next }
+        { print }
+        END { if (!done) print k "=" v }
+      ' "$FILE" >"$tmp"
+    else
+      printf '%s=%s\n' "$key" "$val" >"$tmp"
+    fi
+    mv "$tmp" "$FILE"
+    ;;
+  all)
+    [[ -f $FILE ]] && cat "$FILE"
+    ;;
+  *)
+    echo "Usage: omarchy-audio-panel-state get <key> | set <key> <value> | all" >&2
+    exit 1
+    ;;
+esac

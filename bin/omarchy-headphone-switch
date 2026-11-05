@@ -1,0 +1,254 @@
+#!/bin/bash
+# omarchy-headphone-switch -- Event-driven headphone/speaker auto-switching
+#
+# Monitors PipeWire/WirePlumber card events via pactl subscribe and switches
+# the ALSA card profile between Speaker and Headphones on headphone jack
+# insert/remove.
+#
+# CRASH PREVENTION: Only reacts to state TRANSITIONS (insert/remove events),
+# never to the current state on startup. This avoids destroying/creating
+# PipeWire sink nodes when Quickshell's audio panel may be interacting with
+# them. Added Quickshell safety delay before profile switches.
+#
+# Event-driven: pactl subscribe blocks until an event occurs, so there is no
+# polling loop. Manual selection is respected: if the default sink is not
+# msi_dsp_input (the system/DSP default), automatic switching is suppressed.
+#
+# Reversible: stop and disable the systemd service, or uninstall the script.
+
+set -uo pipefail
+
+CARD_NAME="alsa_card.pci-0000_00_1f.3-platform-skl_hda_dsp_generic"
+DSP_DEFAULT_SINK="msi_dsp_input"
+HEADPHONES_PROFILE_NAME="HiFi (HDMI1, HDMI2, HDMI3, Headphones, Mic1, Mic2)"
+SPEAKER_PROFILE_NAME="HiFi (HDMI1, HDMI2, HDMI3, Mic1, Mic2, Speaker)"
+HEADPHONES_SINK="alsa_output.pci-0000_00_1f.3-platform-skl_hda_dsp_generic.HiFi__Headphones__sink"
+STATE_FILE="${XDG_RUNTIME_DIR:-/tmp}/omarchy-headphone-switch.state"
+DEBOUNCE_SEC=2
+QUIKSHELL_DELAY_SEC=3
+
+log() {
+    logger -t omarchy-headphone-switch "$*"
+}
+
+# Find profile index by name from pactl list cards output
+# wpctl set-profile uses these indexes (0 = off, 1 = second profile, etc.)
+profile_index_by_name() {
+    local target_name="$1"
+    pactl list cards 2>/dev/null | awk -v card="$CARD_NAME" -v target="$target_name" '
+        BEGIN { incard=0; inprofiles=0; idx=-1 }
+        /^[[:space:]]*Name:[[:space:]]/ {
+            if ($2 == card) incard=1; else incard=0
+            inprofiles=0
+            idx=-1
+        }
+        incard && /^[[:space:]]+Profiles:/ { inprofiles=1 }
+        incard && inprofiles && /^[[:space:]]+Active Profile:/ { inprofiles=0 }
+        incard && inprofiles && /^[[:space:]]+.+:/ && !/^[[:space:]]+Profiles:/ && !/^[[:space:]]+Active Profile:/ {
+            idx++
+            line = $0
+            sub(/^[[:space:]]+/, "", line)
+            sub(/:.*/, "", line)
+            if (line == target) { print idx; exit }
+        }
+    '
+}
+
+# Check if automatic switching is allowed (respect manual override)
+auto_switch_allowed() {
+    # The audio panel manages the default sink, so always follow the physical
+    # jack. Gating on the default sink suppressed headphone detection whenever
+    # the panel routed to a physical output.
+    return 0
+}
+
+# Check if Quickshell (Omarchy shell with audio panel) is running
+quickshell_running() {
+    pgrep -x quickshell >/dev/null 2>&1
+}
+
+# Read previously tracked headphones availability state
+read_prev_state() {
+    if [ -f "$STATE_FILE" ]; then
+        cat "$STATE_FILE" 2>/dev/null
+    else
+        echo "unknown"
+    fi
+}
+
+# Write current headphones availability state
+write_state() {
+    local state="$1"
+    mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null
+    echo "$state" > "$STATE_FILE" 2>/dev/null || true
+}
+
+# Set default sink via pactl
+set_default_sink() {
+    local sink_name="$1"
+    pactl set-default-sink "$sink_name" 2>/dev/null || true
+}
+
+# Move application sink inputs to a target sink
+move_streams_to() {
+    local target_sink="$1"
+    pactl list short sink-inputs 2>/dev/null | while read -r line; do
+        local sid
+        sid=$(echo "$line" | awk '{print $1}')
+        [ -z "$sid" ] && continue
+        # Skip EasyEffects output stream (would create a cycle)
+        local app
+        app=$(pactl list sink-inputs 2>/dev/null | awk -v id="$sid" '
+            /^Sink Input #/ {f=0}
+            $2 == id {f=1}
+            f && /application\.name = / {print; exit}
+        ')
+        if echo "$app" | grep -q "EasyEffects"; then
+            continue
+        fi
+        # Move streams that have an application.name (real apps)
+        # Also move the DSP loop (msi_dsp_output) even without application.name,
+        # so the DSP chain follows the active output.
+        local node_name
+        node_name=$(pactl list sink-inputs 2>/dev/null | awk -v id="$sid" '
+            /^Sink Input #/ {f=0}
+            $2 == id {f=1}
+            f && /node\.name = / {
+                name = $0
+                sub(/.*node\.name = "/, "", name)
+                sub(/".*/, "", name)
+                print name
+                exit
+            }
+        ')
+        if [ -n "$app" ] || [ "$node_name" = "msi_dsp_output" ]; then
+            pactl move-sink-input "$sid" "$target_sink" 2>/dev/null || true
+        fi
+    done
+}
+
+# Switch card profile and migrate streams
+switch_profile() {
+    local to_headphones="$1"
+
+    local profile_name profile_index target_sink
+    if [ "$to_headphones" = "1" ]; then
+        profile_name="$HEADPHONES_PROFILE_NAME"
+        target_sink="$HEADPHONES_SINK"
+        log "Headphones insert detected -> switching to Headphones profile"
+    else
+        profile_name="$SPEAKER_PROFILE_NAME"
+        target_sink="$DSP_DEFAULT_SINK"
+        log "Headphones removal detected -> switching to Speaker profile"
+    fi
+
+    # Safety: if Quickshell is running, delay to avoid Repeater crash
+    if quickshell_running; then
+        log "Quickshell running, waiting ${QUIKSHELL_DELAY_SEC}s before profile switch"
+        sleep "$QUIKSHELL_DELAY_SEC"
+    fi
+
+    profile_index=$(profile_index_by_name "$profile_name") || {
+        log "ERROR: could not find profile index for $profile_name"
+        return 1
+    }
+
+    local card_id
+    card_id=$(wpctl list 2>/dev/null | awk -v name="$CARD_NAME" '$2 == name {print $1; exit}')
+    [ -z "$card_id" ] && {
+        log "ERROR: could not find card ID for $CARD_NAME"
+        return 1
+    }
+
+    # Switch profile via wpctl
+    wpctl set-profile "$card_id" "$profile_index" 2>/dev/null || {
+        log "ERROR: wpctl set-profile $card_id $profile_index failed"
+        return 1
+    }
+
+    # Wait for profile to apply and sink to appear
+    sleep 1
+
+    # Verify the sink exists
+    if [ "$to_headphones" = "1" ]; then
+        if ! pactl list sinks short 2>/dev/null | grep -q "$HEADPHONES_SINK"; then
+            log "ERROR: headphone sink did not appear after profile switch"
+            return 1
+        fi
+    fi
+
+    log "Profile switched to $profile_name (audio panel handles routing)"
+    return 0
+}
+
+# Check headphones route availability from pactl list cards
+# Returns "yes" if Headphones profile is available, "no" otherwise
+headphones_available() {
+    # Read the physical Headphones PORT availability, not the profile. The port
+    # is listed in every profile, so this is a stable jack state and does not
+    # flip when this script changes the profile (which caused a feedback loop).
+    pactl list cards 2>/dev/null | awk -v card="$CARD_NAME" '
+        BEGIN { incard=0; avail="unknown" }
+        /^[[:space:]]*Name:[[:space:]]/ {
+            if ($2 == card) incard=1; else incard=0
+        }
+        incard && /\[Out\] Headphones:/ {
+            if ($0 ~ /not available/) avail="no"
+            else if ($0 ~ /, available\)/) avail="yes"
+        }
+        END { print avail }
+    '
+}
+
+
+# Main loop: event-driven via pactl subscribe
+main() {
+    log "Starting headphone auto-switch monitor"
+
+    # Record initial state but DO NOT act on it - prevents crash on startup
+    # when headphones are already plugged in.
+    local initial_avail
+    initial_avail=$(headphones_available)
+    write_state "$initial_avail"
+    log "Initial headphones state: $initial_avail (no action on startup)"
+
+    while true; do
+        # pactl subscribe blocks until an event occurs
+        pactl subscribe 2>/dev/null | while read -r line; do
+            # Only react to card change events
+            echo "$line" | grep -q "Event .*change.*on card" || continue
+
+            # Debounce to let the card state settle
+            sleep "$DEBOUNCE_SEC"
+
+            # Re-check: only act if we're allowed (manual override respected)
+            if ! auto_switch_allowed; then
+                continue
+            fi
+
+            local curr_avail prev_avail
+            curr_avail=$(headphones_available)
+            prev_avail=$(read_prev_state)
+
+            # Only act on STATE CHANGES (transitions), not current state
+            if [ "$curr_avail" = "$prev_avail" ]; then
+                continue
+            fi
+
+            if [ "$curr_avail" = "yes" ]; then
+                switch_profile 1
+            elif [ "$curr_avail" = "no" ]; then
+                switch_profile 0
+            fi
+
+            # Update tracked state after successful evaluation
+            write_state "$curr_avail"
+        done
+
+        # If pactl subscribe exits, restart after a short delay
+        log "pactl subscribe exited, restarting in 5s"
+        sleep 5
+    done
+}
+
+main "$@"

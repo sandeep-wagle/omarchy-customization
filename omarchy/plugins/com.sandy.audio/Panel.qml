@@ -20,15 +20,6 @@ Panel {
   readonly property var mediaService: bar?.shell?.firstPartyServiceFor("omarchy.media")
   readonly property var activeMediaPlayer: mediaService ? mediaService.activePlayer : null
 
-  readonly property var candidateSinks: {
-    var list = []
-    for (var i = 0; i < nodes.length; i++) {
-      var n = nodes[i]
-      if (n && n.isSink && !n.isStream) list.push(n)
-    }
-    return list
-  }
-
   readonly property var candidateSources: {
     var list = []
     for (var i = 0; i < nodes.length; i++) {
@@ -81,6 +72,23 @@ Panel {
   // selectable, so plugging a device in after opening the panel — or
   // force-routing to it — never strands the user with a single row.
   // The active sink keeps the selected highlight + bold label.
+  // HDMI sinks whose ports are "not available" (cable unplugged) are excluded
+  // entirely so the list doesn't show dead outputs.
+  readonly property var candidateSinks: {
+    var list = []
+    for (var i = 0; i < nodes.length; i++) {
+      var n = nodes[i]
+      if (n && n.isSink && !n.isStream) {
+        // Skip HDMI sinks when their port is not available
+        if (n.name && n.name.indexOf("HDMI") >= 0 && !root.sinkAvailable(n)) {
+          continue
+        }
+        list.push(n)
+      }
+    }
+    return list
+  }
+
   readonly property var rawAudioSinks: {
     var list = candidateSinks.slice()
     if (sink && list.indexOf(sink) < 0) list.unshift(sink)
@@ -112,15 +120,208 @@ Panel {
   property var displayAudioSources: []
   property var displayAudioStreams: []
 
-  // MSI Center single-knob contract: the *default* sink (msi_dsp_input while
-  // the DSP chain runs, the physical sink otherwise) is the one and only
-  // volume authority. Display speaks 0-100%; the real sink level is tempered
-  // 0-150% (real = 1.5 * display) exactly once at each write, and de-tempered
-  // on every read. The physical speaker stays pinned at 100% and is never
-  // user-driven. Resolving the default (rather than "whatever a tuning
-  // fronts") is what keeps this correct when headphones or HDMI are selected
-  // while a tuning still exists -- same definition the volume keys use.
+  // Single-knob contract: the *default* sink (msi_dsp_input while the DSP
+  // chain runs, the physical sink otherwise) is the one and only volume
+  // authority. Display and real volume share the same 0-150% scale, exactly
+  // like the volume keys, so no value can be silently capped.
   property string volumeSinkName: ""
+
+  // Audio source mode: "speakers" | "headphones" | "both"
+  // Controls where audio is routed when the user manually selects an output.
+  property string audioSourceMode: "speakers"
+
+  // DSP playback on/off. ON routes the default output through msi_dsp_input
+  // so the DSP effect is heard; OFF routes straight to the physical sink.
+  property bool dspEnabled: false
+  property bool dspUserSet: false
+  // Per-mode DSP memory. The top toggle remembers its state for each output
+  // mode, so switching speakers -> headphones -> speakers restores what the
+  // user last chose for that mode.
+  property bool dspSpeakers: true
+  property bool dspHeadphones: false
+  property bool dspBoth: true
+  // Physical output the user picked in the OUTPUT list (Speaker, an HDMI sink,
+  // ...). "speakers" mode routes here when DSP is off, so choosing HDMI is not
+  // overridden by the default Speaker sink.
+  property string preferredSpeakerSink: ""
+  // Startup routing runs before PipeWire nodes may be populated. Track whether
+  // the restored state has been applied so onAudioSinksChanged can retry.
+  property bool stateRestored: false
+  property bool routingApplied: false
+
+  // Headphones count as connected only when the physical port is available;
+  // the sink node can linger while the jack is empty (port unavailable).
+  readonly property bool headphonesConnected: {
+    var hp = root.headphonesSinkNode()
+    return !!hp && root.sinkAvailable(hp)
+  }
+
+  // When no headphones are connected the panel only offers Speakers, so mode
+  // and DSP follow the speakers memory.
+  readonly property string effectiveMode: root.headphonesConnected ? root.audioSourceMode : "speakers"
+
+  // Find the speaker sink node (physical speakers). Falls back to an available
+// HDMI sink, then the DSP input, when no physical speaker sink is present
+// (headphones plugged in disables the internal speakers hardware).
+  function speakerSinkNode() {
+    // 1. The physical output the user explicitly chose in the OUTPUT list.
+    if (root.preferredSpeakerSink !== "") {
+      for (var p = 0; p < root.candidateSinks.length; p++) {
+        var pref = root.candidateSinks[p]
+        if (pref && pref.name === root.preferredSpeakerSink) return pref
+      }
+    }
+    // 2. The internal speaker sink.
+    for (var i = 0; i < root.candidateSinks.length; i++) {
+      var n = root.candidateSinks[i]
+      if (n && n.name && n.name.indexOf("__Speaker__sink") >= 0) return n
+    }
+    // 3. Any available HDMI sink.
+    for (var j = 0; j < root.candidateSinks.length; j++) {
+      var h = root.candidateSinks[j]
+      if (h && h.name && h.name.indexOf("HDMI") >= 0 && root.sinkAvailable(h)) return h
+    }
+    return root.dspSinkNode()
+  }
+
+  // Find the headphones sink node (physical headphones).
+  function headphonesSinkNode() {
+    for (var i = 0; i < root.candidateSinks.length; i++) {
+      var n = root.candidateSinks[i]
+      if (n && n.name && n.name.indexOf("__Headphones__sink") >= 0) return n
+    }
+    return null
+  }
+
+  // Find the DSP playback sink (msi_dsp_input), if present.
+  function dspSinkNode() {
+    for (var i = 0; i < root.candidateSinks.length; i++) {
+      var n = root.candidateSinks[i]
+      if (n && n.name && String(n.name).indexOf("msi_dsp") === 0) return n
+    }
+    return null
+  }
+
+  // Remove the Speaker->Headphones loopback used by "both" mode. Called on
+  // every mode change so leaving "both" stops the duplicate output. A shared
+  // flock serialises this across the bar instances (one per monitor).
+  function unloadBothLoopback(hp) {
+    if (!hp) return
+    var unload = "exec 9>/tmp/omarchy-audio-loopback.lock; flock 9; "
+      + "pactl list short modules | awk -v s='" + hp.name
+      + "' '$2==\"module-loopback\" && $0 ~ s {print $1}' | xargs -r -n1 pactl unload-module"
+    Quickshell.execDetached(["bash", "-lc", unload])
+  }
+
+  // Replace the Speaker->Headphones loopback for "both" mode. Unload and load
+  // run in one flock-protected shell so the async unload cannot race ahead and
+  // drop the module we just created, and two bar instances cannot each leave a
+  // duplicate module behind.
+  function setBothLoopback(hp, spk) {
+    if (!hp || !spk) return
+    var cmd = "exec 9>/tmp/omarchy-audio-loopback.lock; flock 9; "
+      + "pactl list short modules | awk -v s='" + hp.name
+      + "' '$2==\"module-loopback\" && $0 ~ s {print $1}' | xargs -r -n1 pactl unload-module; "
+      + "pactl load-module module-loopback sink=" + hp.name
+      + " source=" + spk.name + ".monitor"
+    Quickshell.execDetached(["bash", "-lc", cmd])
+  }
+
+  // Move the DSP chain output (msi_dsp_output) onto the chosen physical sink so
+  // DSP playback follows whatever output the user picked instead of being stuck
+  // on the speaker.
+  function moveDspOutputTo(node) {
+    if (!node) return
+    var cmd = "sid=$(pactl list sink-inputs 2>/dev/null | awk '/^Sink Input #/{id=$3;sub(/#/,\"\",id)} /node.name = \"msi_dsp_output\"/{print id; exit}'); "
+      + "tid=$(pactl list short sinks | awk -v n='" + node.name + "' '$2==n {print $1; exit}'); "
+      + "[ -n \"$sid\" ] && [ -n \"$tid\" ] && pactl move-sink-input \"$sid\" \"$tid\" 2>/dev/null || true"
+    Quickshell.execDetached(["bash", "-lc", cmd])
+  }
+
+  function persistState(key, value) {
+    Quickshell.execDetached(["omarchy-audio-panel-state", "set", key, value])
+  }
+
+  // Route the current mode. When DSP is on, apps go through msi_dsp_input and
+  // the DSP output follows the chosen physical sink; when off, apps go
+  // straight to the physical sink.
+  function applyAudioRouting() {
+    var spk = root.speakerSinkNode()
+    var hp = root.headphonesSinkNode()
+    var dsp = root.dspSinkNode()
+    var mode = root.effectiveMode
+    var physical = (mode === "headphones") ? hp : spk
+    var useDsp = root.dspEnabled && dsp && physical
+
+    if (mode === "headphones") {
+      root.unloadBothLoopback(hp)
+      if (!physical) return
+      if (useDsp) { root.setDefaultSink(dsp); root.moveDspOutputTo(physical) }
+      else root.setDefaultSink(physical)
+      return
+    }
+    if (mode === "both") {
+      if (!spk || !hp) { root.unloadBothLoopback(hp); return }
+      if (useDsp) { root.setDefaultSink(dsp); root.moveDspOutputTo(spk) }
+      else root.setDefaultSink(spk)
+      root.setBothLoopback(hp, spk)
+      return
+    }
+    // speakers mode
+    root.unloadBothLoopback(hp)
+    if (!physical) return
+    if (useDsp) { root.setDefaultSink(dsp); root.moveDspOutputTo(physical) }
+    else root.setDefaultSink(physical)
+  }
+
+  // Switch audio source mode. "speakers" | "headphones" | "both".
+  function setAudioSourceMode(mode) {
+    audioSourceMode = mode
+    root.persistState("mode", mode)
+    root.dspEnabled = root.dspForMode(root.effectiveMode)
+    root.dspUserSet = true
+    root.applyAudioRouting()
+    root.showStatus("Audio mode: " + mode, "info")
+  }
+
+  // Remembered DSP state for a given output mode.
+  function dspForMode(mode) {
+    if (mode === "headphones") return root.dspHeadphones
+    if (mode === "both") return root.dspBoth
+    return root.dspSpeakers
+  }
+
+  function rememberDsp(mode, on) {
+    if (mode === "headphones") root.dspHeadphones = on
+    else if (mode === "both") root.dspBoth = on
+    else root.dspSpeakers = on
+    root.persistState("dsp_" + mode, on ? "on" : "off")
+  }
+
+  function setDspEnabled(on) {
+    root.dspUserSet = true
+    root.dspEnabled = on
+    root.rememberDsp(root.effectiveMode, on)
+    root.persistState("dsp", on ? "on" : "off")
+    root.applyAudioRouting()
+    root.showStatus("DSP playback: " + (on ? "on" : "off"), "info")
+  }
+
+// Selecting a row in OUTPUT changes the mode only. The DSP toggle stays the
+// single control for DSP on/off, and its state follows the mode's memory.
+  function selectSink(node) {
+    if (!node) return
+    var name = String(node.name || "")
+    if (name.indexOf("__Headphones__sink") >= 0) {
+      root.setAudioSourceMode("headphones")
+    } else if (name.indexOf("msi_dsp") === 0) {
+      root.setAudioSourceMode("speakers")
+    } else {
+      root.preferredSpeakerSink = name
+      root.persistState("speaker_sink", name)
+      root.setAudioSourceMode("speakers")
+    }
+  }
 
   // Carry sub-notch touchpad deltas between wheel events.
   property real wheelAccumulator: 0
@@ -138,21 +339,116 @@ Panel {
 
   // Re-resolve whenever the selected output changes; the timer below is only a
   // safety net for the tuning being applied or removed underneath us.
-  onSinkChanged: resolveVolumeSink()
+  onSinkChanged: {
+    resolveVolumeSink()
+  }
+
+  function applyPanelState(raw) {
+    var lines = String(raw || "").split("\n")
+    var legacyDsp = null
+    var sawSpeakersDsp = false
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i]
+      var eq = line.indexOf("=")
+      if (eq <= 0) continue
+      var key = line.substring(0, eq)
+      var value = line.substring(eq + 1)
+      if (key === "mode" && (value === "speakers" || value === "headphones" || value === "both"))
+        audioSourceMode = value
+      else if (key === "dsp_speakers") { root.dspSpeakers = value === "on"; sawSpeakersDsp = true }
+      else if (key === "dsp_headphones") root.dspHeadphones = value === "on"
+      else if (key === "dsp_both") root.dspBoth = value === "on"
+      else if (key === "speaker_sink") root.preferredSpeakerSink = value
+      else if (key === "dsp") legacyDsp = value === "on"
+    }
+    // Back-compat: older state files only had a single `dsp` key.
+    if (!sawSpeakersDsp && legacyDsp !== null) root.dspSpeakers = legacyDsp
+    root.dspEnabled = root.dspForMode(root.effectiveMode)
+    root.dspUserSet = true
+    root.stateRestored = true
+    if (root.routingApplied) {
+      // State file changed after startup (another bar instance): apply now.
+      root.applyAudioRouting()
+    } else {
+      root.tryApplyRestoredRouting()
+    }
+  }
+
+  // Headphones plugged/unplugged: follow the physical jack. The card exposes
+  // either the Speaker or the Headphones sink, never both, so the mode must
+  // track the jack. DSP state still comes from each mode's own memory.
+  onHeadphonesConnectedChanged: {
+    if (!root.stateRestored) return
+    if (root.headphonesConnected) {
+      if (root.audioSourceMode === "speakers") root.audioSourceMode = "headphones"
+    } else if (root.audioSourceMode !== "speakers") {
+      root.audioSourceMode = "speakers"
+    }
+    root.persistState("mode", root.audioSourceMode)
+    root.dspEnabled = root.dspForMode(root.effectiveMode)
+    root.applyAudioRouting()
+  }
+
+  // Apply restored routing once the node required by the mode is available.
+  function tryApplyRestoredRouting() {
+    if (!root.stateRestored || root.routingApplied) return
+    if (!root.sinkAvailabilityLoaded) return
+    if (root.candidateSinks.length === 0) return
+    var mode = root.effectiveMode
+    if (mode === "headphones" && !root.headphonesSinkNode()) return
+    if (mode === "both"
+        && (!root.headphonesSinkNode() || !root.speakerSinkNode())) return
+    root.routingApplied = true
+    root.applyAudioRouting()
+  }
 
   function resolveVolumeSink() {
     if (!volumeSinkProc.running) volumeSinkProc.running = true
   }
 
-  // Display units (0-1): the sink holds tempered real units (0-1.5), so the
-  // read path de-tempers. Matches setOutputVolume below and the volume keys.
+  // Internal units (0-1) match PipeWire sink volume. Display scales to 0-150
+  // at the UI boundary (slider, OSD, percentage text).
   readonly property real outputVolume: {
     if (!volumeSink || !volumeSink.audio) return 0
-    return Math.max(0, Math.min(1, volumeSink.audio.volume / 1.5))
+    return Math.max(0, Math.min(1, volumeSink.audio.volume))
   }
   readonly property bool outputMuted: volumeSink && volumeSink.audio ? volumeSink.audio.muted : false
   readonly property real inputVolume: source && source.audio ? source.audio.volume : 0
   readonly property bool inputMuted: source && source.audio ? source.audio.muted : false
+
+  // Status feedback for switch/test actions
+  property string statusMessage: ""
+  property string statusType: "info"  // info, success, error
+  property bool statusVisible: false
+
+  function showStatus(message, type) {
+    statusMessage = message
+    statusType = type || "info"
+    statusVisible = true
+    if (statusClearTimer.running) statusClearTimer.restart()
+    else statusClearTimer.start()
+  }
+
+  function clearStatus() {
+    statusVisible = false
+    statusMessage = ""
+  }
+
+  function refreshDevices() {
+    if (!sinkAvailabilityProc.running) sinkAvailabilityProc.running = true
+    if (!volumeSinkProc.running) volumeSinkProc.running = true
+    showStatus("Refreshing devices…", "info")
+  }
+
+  function playTestAudio() {
+    if (!volumeSink || !volumeSink.name) {
+      showStatus("No output sink available", "error")
+      return
+    }
+    // Play a short test tone through the default sink (paplay uses PulseAudio/PipeWire)
+    Quickshell.execDetached(["paplay", "-d", volumeSink.name, "/usr/share/sounds/alsa/Front_Center.wav"])
+    showStatus("Test audio: " + volumeSink.name, "info")
+  }
 
   onRawAudioSinksChanged: if (rawAudioSinks.length > 0) cachedAudioSinks = rawAudioSinks
   onRawAudioSourcesChanged: if (rawAudioSources.length > 0) cachedAudioSources = rawAudioSources
@@ -279,7 +575,7 @@ Panel {
   // moving the global slider would surprise the user.
   function adjustVolume(delta) {
     if (focusSection === "output" && selectedIndex === -1) {
-      setOutputVolume(outputVolume + delta)
+      setOutputVolume(root.outputVolume * 150 + delta * 150)
       return
     }
     if (focusSection === "input" && selectedIndex === -1) {
@@ -315,6 +611,9 @@ Panel {
 
   onOpenedChanged: {
     if (opened) {
+      // Re-read persisted mode/DSP so this instance matches what the other
+      // monitor's bar last saved.
+      if (root.stateRestored && !panelStateProc.running) panelStateProc.running = true
       refreshDisplayAudioModels()
       focusSection = "output"
       selectedIndex = -1  // first keyboard cursor reveal starts on the output slider
@@ -326,7 +625,11 @@ Panel {
   }
 
   // Clamp / repair the cursor whenever any list refreshes underneath us.
-  onAudioSinksChanged: scheduleDisplayAudioModelRefresh()
+  onAudioSinksChanged: {
+    scheduleDisplayAudioModelRefresh()
+    root.tryApplyRestoredRouting()
+    availabilityRefreshTimer.restart()
+  }
   onAudioSourcesChanged: scheduleDisplayAudioModelRefresh()
   onAudioStreamsChanged: scheduleDisplayAudioModelRefresh()
 
@@ -336,7 +639,15 @@ Panel {
 
   function refreshDisplayAudioModels() {
     if (!opened) return
-    displayAudioSinks = listSnapshot(audioSinks)
+    // DSP input is controlled by the top toggle, not the OUTPUT list.
+    var rawSinks = listSnapshot(audioSinks)
+    var shownSinks = []
+    for (var i = 0; i < rawSinks.length; i++) {
+      var n = rawSinks[i]
+      if (n && n.name && String(n.name).indexOf("msi_dsp") === 0) continue
+      shownSinks.push(n)
+    }
+    displayAudioSinks = shownSinks
     displayAudioSources = listSnapshot(audioSources)
     displayAudioStreams = listSnapshot(audioStreams)
     clampCursor()
@@ -429,20 +740,21 @@ Panel {
     return Model.outputVolumeName(volume, muted)
   }
 
-  // Display in (0-1), tempered real out (0-1.5): the single temper point for
-  // this UI, mirroring the volume keys and the DSP service. Returns display.
+  // Display and sink volume share one 0-150 scale. Raising above zero also
+  // unmutes so a muted sink can never look "stuck" at a level.
   function setOutputVolume(v) {
     if (!volumeSink || !volumeSink.audio) return outputVolume
-    var display = Math.max(0, Math.min(1, v))
-    volumeSink.audio.volume = Math.min(1.5, display * 1.5)
+    var display = Math.max(0, Math.min(150, v))
+    volumeSink.audio.volume = display / 150
+    if (display > 0 && volumeSink.audio.muted) volumeSink.audio.muted = false
     return display
   }
 
   function showVolumeOsd(volume) {
     if (!bar || !bar.shell) return
     bar.shell.summon("omarchy.osd", JSON.stringify({
-      icon: outputIcon(volume),
-      value: Math.round(volume * 100)
+      icon: outputIcon(volume / 150),
+      value: Math.round(volume)
     }))
   }
 
@@ -468,15 +780,190 @@ Panel {
     if (hasInput) source.audio.muted = mute
   }
 
+  // ---- Route verification state ----
+  property string pendingSinkName: ""
+  property int verifyRetryCount: 0
+  property int verifyMaxRetries: 3
+  property int verifyRetryDelay: 1000
+  property string verifyStage: "idle"  // idle, checking-default, checking-streams, done
+
   function setDefaultSink(node) {
     if (!node) return
     Pipewire.preferredDefaultAudioSink = node
     if (node.id !== undefined && node.name) {
+      pendingSinkName = node.name
+      verifyRetryCount = 0
+      verifyStage = "idle"
       Quickshell.execDetached([
         "omarchy-audio-output-set-default",
         String(node.id),
         String(node.name)
       ])
+      // Also refresh the volume target so volume keys stay on the right sink
+      refreshVolumeSinkTarget()
+      // Start bounded-retry route verification
+      scheduleVerifyRetry()
+    }
+  }
+
+  function scheduleVerifyRetry() {
+    if (verifyRetryCount >= verifyMaxRetries) {
+      finalizeVerification()
+      return
+    }
+    verifyRetryCount++
+    verifyRetryTimer.interval = verifyRetryDelay
+    verifyRetryTimer.restart()
+  }
+
+  function runVerifyCheck() {
+    verifyStage = "checking-default"
+    verifySinkProc.running = true
+  }
+
+  function finalizeVerification() {
+    if (verifyStage === "routing-verified") {
+      root.showStatus("Output routed: " + root.friendlyDeviceLabel(pendingSinkName), "success")
+    } else if (verifyStage === "default-changed") {
+      root.showStatus("Default changed: " + root.friendlyDeviceLabel(pendingSinkName), "info")
+    } else if (verifyStage === "routing-failed") {
+      root.showStatus("Switch failed: routing incomplete", "error")
+    } else {
+      root.showStatus("Verification inconclusive", "error")
+    }
+    pendingSinkName = ""
+    verifyRetryCount = 0
+    verifyStage = "idle"
+  }
+
+  // Check default sink name via pactl
+  Process {
+    id: verifySinkProc
+    command: ["pactl", "get-default-sink"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var current = String(text).trim()
+        if (current === pendingSinkName) {
+          verifyStage = "checking-streams"
+          verifyStreamProc.running = true
+        } else {
+          if (verifyRetryCount < verifyMaxRetries) {
+            scheduleVerifyRetry()
+          } else {
+            verifyStage = "routing-failed"
+            finalizeVerification()
+          }
+        }
+      }
+    }
+  }
+
+  // Check application stream destinations via pactl sink-inputs + sinks short
+  Process {
+    id: verifyStreamProc
+    command: ["sh", "-c", "pactl list sink-inputs 2>/dev/null; echo '---SEPARATOR---'; pactl list sinks short 2>/dev/null"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var result = checkStreamRouting(text)
+        if (result === "verified") {
+          verifyStage = "routing-verified"
+          finalizeVerification()
+        } else if (result === "incomplete") {
+          if (verifyRetryCount < verifyMaxRetries) {
+            scheduleVerifyRetry()
+          } else {
+            verifyStage = "default-changed"
+            finalizeVerification()
+          }
+        } else {
+          // inconclusive
+          if (verifyRetryCount < verifyMaxRetries) {
+            scheduleVerifyRetry()
+          } else {
+            verifyStage = "default-changed"
+            finalizeVerification()
+          }
+        }
+      }
+    }
+  }
+
+  // Parse pactl output to determine if app streams are routed to the target sink.
+  // Returns "verified", "incomplete", or "inconclusive".
+  function checkStreamRouting(raw) {
+    var target = pendingSinkName || ""
+    if (!target) return "inconclusive"
+
+    var text = String(raw || "")
+    var parts = text.split("---SEPARATOR---")
+    var sinkInputsText = parts[0] || ""
+    var sinksShortText = parts[1] || ""
+
+    // Build sink index -> name map from "pactl list sinks short"
+    var sinkIndexToName = {}
+    var sinkLines = sinksShortText.split("\n")
+    for (var i = 0; i < sinkLines.length; i++) {
+      var m = sinkLines[i].match(/^(\d+)\t([^\t]+)/)
+      if (m) {
+        sinkIndexToName[m[1]] = m[2]
+      }
+    }
+
+    // Parse sink-inputs entries
+    var inputLines = sinkInputsText.split("\n")
+    var currentId = ""
+    var currentApp = ""
+    var currentSinkIndex = ""
+    var foundAppStream = false
+    var allOnTarget = true
+
+    function flushEntry() {
+      if (currentId && currentApp && currentApp !== "EasyEffects") {
+        foundAppStream = true
+        var sinkName = sinkIndexToName[currentSinkIndex] || ""
+        if (sinkName !== target && currentSinkIndex !== target) {
+          allOnTarget = false
+        }
+      }
+    }
+
+    for (var i = 0; i < inputLines.length; i++) {
+      var line = inputLines[i]
+
+      var m = line.match(/^Sink Input #(\d+)/)
+      if (m) {
+        flushEntry()
+        currentId = m[1]
+        currentApp = ""
+        currentSinkIndex = ""
+        continue
+      }
+
+      m = line.match(/^\tSink: (\d+)/)
+      if (m) {
+        currentSinkIndex = m[1]
+        continue
+      }
+
+      m = line.match(/application\.name = "([^"]+)"/)
+      if (m) {
+        currentApp = m[1]
+        continue
+      }
+    }
+    flushEntry()
+
+    if (!foundAppStream) return "inconclusive"
+    return allOnTarget ? "verified" : "incomplete"
+  }
+
+  // Refresh the physical volume target after a default-sink or profile change,
+  // so volume keys always target the correct sink underneath any DSP chain.
+  function refreshVolumeSinkTarget() {
+    if (!volumeSinkProc.running) {
+      volumeSinkProc.running = true
     }
   }
 
@@ -501,6 +988,7 @@ Panel {
   function updateSinkAvailability(raw) {
     sinkAvailability = Model.parseSinkAvailability(raw)
     sinkAvailabilityLoaded = true
+    root.tryApplyRestoredRouting()
   }
 
   function friendlyDeviceLabel(text) {
@@ -521,6 +1009,49 @@ Panel {
 
   function sinkGlyph(node) {
     return Model.sinkGlyph(node)
+  }
+
+  // Detect virtual DSP sinks (e.g. msi_dsp_input, omarchy_speaker_tuning) that
+  // are intermediates in the routing chain rather than physical outputs.
+  // Null-safe: returns false if node is invalid or being destroyed.
+  function isDspSink(node) {
+    if (!node) return false
+    try {
+      var name = String(node.name || "")
+      if (name.indexOf("msi_dsp") === 0 || name.indexOf("omarchy_speaker_tuning") === 0 || name.indexOf("easyeffects") === 0) {
+        return true
+      }
+      var p = nodeProps(node)
+      if (p && p["node.virtual"] === "true") return true
+    } catch (e) {
+      // Node may be mid-destruction; treat as non-DSP
+      return false
+    }
+    return false
+  }
+
+  // Find the speaker sink node (physical speakers).
+  function speakerSink() {
+    for (var i = 0; i < root.candidateSinks.length; i++) {
+      var n = root.candidateSinks[i]
+      if (n && n.name && n.name.indexOf("__Speaker__sink") >= 0) return n
+    }
+    return null
+  }
+
+  // Find the headphones sink node (physical headphones).
+  function headphonesSink() {
+    for (var i = 0; i < root.candidateSinks.length; i++) {
+      var n = root.candidateSinks[i]
+      if (n && n.name && n.name.indexOf("__Headphones__sink") >= 0) return n
+    }
+    return null
+  }
+
+  // Check if a given sink node is the active default sink.
+  function isSinkActive(sinkNode) {
+    if (!sinkNode || !root.sink) return false
+    return root.sink.id === sinkNode.id
   }
 
   function sourceGlyph(node) {
@@ -608,8 +1139,28 @@ Panel {
     command: ["pactl", "get-default-sink"]
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.volumeSinkName = String(text).trim()
+      onStreamFinished: {
+        root.volumeSinkName = String(text).trim()
+        if (!root.dspUserSet)
+          root.dspEnabled = root.volumeSinkName.indexOf("msi_dsp") === 0
+      }
     }
+  }
+
+  // Restore the persisted audio mode at startup. The panel also re-reads this
+  // on open, which keeps the two monitor bar instances in sync (only one panel
+  // is open at a time because it closes on pointer-leave).
+  Process {
+    id: panelStateProc
+    command: ["omarchy-audio-panel-state", "all"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.applyPanelState(text)
+    }
+  }
+  Component.onCompleted: {
+    if (!panelStateProc.running) panelStateProc.running = true
+    if (!sinkAvailabilityProc.running) sinkAvailabilityProc.running = true
   }
 
   Timer {
@@ -638,6 +1189,31 @@ Panel {
     onTriggered: root.refreshDisplayAudioModels()
   }
 
+  // Re-probe port availability after sink changes so plugging/unplugging
+  // headphones updates headphonesConnected (and the mode selector).
+  Timer {
+    id: availabilityRefreshTimer
+    interval: 600
+    repeat: false
+    onTriggered: if (!sinkAvailabilityProc.running) sinkAvailabilityProc.running = true
+  }
+
+  // Auto-clear status messages after 3 seconds
+  Timer {
+    id: statusClearTimer
+    interval: 3000
+    repeat: false
+    onTriggered: root.clearStatus()
+  }
+
+  // One-shot retry for route verification
+  Timer {
+    id: verifyRetryTimer
+    interval: 1000
+    repeat: false
+    onTriggered: root.runVerifyCheck()
+  }
+
   BarIconButton {
     id: button
     anchors.fill: parent
@@ -653,7 +1229,7 @@ Panel {
       var wheel = Util.wheelSteps(root.wheelAccumulator, delta)
       root.wheelAccumulator = wheel.remainder
       if (wheel.steps === 0) return
-      var volume = root.setOutputVolume(root.outputVolume + wheel.steps * 0.05)
+      var volume = root.setOutputVolume(root.outputVolume * 150 + wheel.steps * 5)
       root.showVolumeOsd(volume)
     }
   }
@@ -693,6 +1269,10 @@ Panel {
           } else {
             root.toggleOutputMute()
           }
+        } else if (t === "r" || t === "R") {
+          root.refreshDevices()
+        } else if (t === "t" || t === "T") {
+          root.playTestAudio()
         }
       }
 
@@ -752,9 +1332,59 @@ Panel {
               }
             }
 
+            // Quick-switch: Speaker / Headphones. Always visible so the user
+            // can change outputs without unplugging/replugging headphones.
+            Row {
+              id: speakerSwitcher
+              anchors.left: heroIcon.right
+              anchors.leftMargin: Style.space(10)
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: Style.space(6)
+
+              Text {
+                id: speakerSwitcherSpeaker
+                textFormat: Text.PlainText
+                text: "󰓃 Speakers"
+                color: isSinkActive(speakerSink()) ? root.bar.foreground : Qt.darker(root.bar.foreground, 1.4)
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: isSinkActive(speakerSink())
+                anchors.verticalCenter: parent.verticalCenter
+                MouseArea {
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: {
+                    var s = root.speakerSink()
+                    if (s) root.setDefaultSink(s)
+                  }
+                }
+              }
+
+              Text {
+                id: speakerSwitcherHeadphones
+                textFormat: Text.PlainText
+                text: "󰋋 Headphones"
+                color: isSinkActive(headphonesSink()) ? root.bar.foreground : Qt.darker(root.bar.foreground, 1.4)
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: isSinkActive(headphonesSink())
+                anchors.verticalCenter: parent.verticalCenter
+                MouseArea {
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: {
+                    var s = root.headphonesSink()
+                    if (s) root.setDefaultSink(s)
+                  }
+                }
+              }
+            }
+
             Column {
               id: heroLabels
-              anchors.left: heroIcon.right
+              anchors.left: speakerSwitcher.right
               anchors.leftMargin: Style.space(14)
               anchors.right: parent.right
               anchors.rightMargin: powerSwitch.width + Style.space(12)
@@ -789,6 +1419,164 @@ Panel {
             }
           }
 
+          // ---- Audio source mode selection ----
+          PanelSeparator {
+            foreground: root.bar.foreground
+          }
+
+          Column {
+            width: parent.width
+            spacing: Style.space(6)
+
+            Item {
+              width: parent.width
+              implicitHeight: Math.max(sourceModeHeader.implicitHeight, sourceModeRow.implicitHeight)
+
+              PanelSectionHeader {
+                id: sourceModeHeader
+                text: "AUDIO MODE"
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+              }
+
+              Row {
+                id: sourceModeRow
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: Style.space(10)
+
+                // Speakers mode button
+                Row {
+                  id: modeSpeakersRow
+                  spacing: Style.space(4)
+                  anchors.verticalCenter: parent.verticalCenter
+
+                  Text {
+                    text: root.audioSourceMode === "speakers" ? "✓" : "○"
+                    color: root.audioSourceMode === "speakers" ? "#8aff8a" : root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: true
+                    anchors.verticalCenter: parent.verticalCenter
+                  }
+
+                  Text {
+                    text: "󰓃 Speakers"
+                    color: root.audioSourceMode === "speakers" ? root.bar.foreground : Qt.darker(root.bar.foreground, 1.4)
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: root.audioSourceMode === "speakers"
+                    anchors.verticalCenter: parent.verticalCenter
+                    MouseArea {
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.setAudioSourceMode("speakers")
+                    }
+                  }
+                }
+
+                // Headphones mode button
+                Row {
+                  id: modeHeadphonesRow
+                  visible: root.headphonesConnected
+                  spacing: Style.space(4)
+                  anchors.verticalCenter: parent.verticalCenter
+
+                  Text {
+                    text: root.audioSourceMode === "headphones" ? "✓" : "○"
+                    color: root.audioSourceMode === "headphones" ? "#8aff8a" : root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: true
+                    anchors.verticalCenter: parent.verticalCenter
+                  }
+
+                  Text {
+                    text: "󰋋 Headphones"
+                    color: root.audioSourceMode === "headphones" ? root.bar.foreground : Qt.darker(root.bar.foreground, 1.4)
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: root.audioSourceMode === "headphones"
+                    anchors.verticalCenter: parent.verticalCenter
+                    MouseArea {
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.setAudioSourceMode("headphones")
+                    }
+                  }
+                }
+
+                // Both mode button
+                Row {
+                  id: modeBothRow
+                  visible: root.headphonesConnected
+                  spacing: Style.space(4)
+                  anchors.verticalCenter: parent.verticalCenter
+
+                  Text {
+                    text: root.audioSourceMode === "both" ? "✓" : "○"
+                    color: root.audioSourceMode === "both" ? "#8aff8a" : root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: true
+                    anchors.verticalCenter: parent.verticalCenter
+                  }
+
+                  Text {
+                    text: "󰢻 Both"
+                    color: root.audioSourceMode === "both" ? root.bar.foreground : Qt.darker(root.bar.foreground, 1.4)
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: root.audioSourceMode === "both"
+                    anchors.verticalCenter: parent.verticalCenter
+                    MouseArea {
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.setAudioSourceMode("both")
+                    }
+                  }
+                }
+              }
+            }
+
+            // DSP playback toggle: ON routes speakers/both through
+            // msi_dsp_input so the effect is heard; OFF bypasses it.
+            Row {
+              width: parent.width
+              spacing: Style.space(8)
+
+              Text {
+                textFormat: Text.PlainText
+                text: "󰓃 DSP Playback"
+                color: root.bar.foreground
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.caption
+                anchors.verticalCenter: parent.verticalCenter
+              }
+
+              ToggleSwitch {
+                checked: root.dspEnabled
+                foreground: root.bar.foreground
+                anchors.verticalCenter: parent.verticalCenter
+                onToggled: root.setDspEnabled(!root.dspEnabled)
+              }
+
+              Text {
+                textFormat: Text.PlainText
+                text: root.dspEnabled ? "On" : "Off"
+                color: Qt.darker(root.bar.foreground, 1.4)
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.caption
+                anchors.verticalCenter: parent.verticalCenter
+              }
+            }
+          }
+
           // ---- Output devices ----
           PanelSeparator {
             foreground: root.bar.foreground
@@ -814,7 +1602,7 @@ Panel {
               Text {
                 id: outputPercent
                 textFormat: Text.PlainText
-                text: Math.round((outputSlider.dragging ? outputSlider.liveValue : root.outputVolume) * 100) + "%"
+                text: Math.round(outputSlider.dragging ? outputSlider.liveValue : outputVolume * 150) + "%"
                 color: Qt.darker(root.bar.foreground, 1.4)
                 font.family: root.bar.fontFamily
                 font.pixelSize: Style.font.caption
@@ -824,6 +1612,21 @@ Panel {
                 anchors.verticalCenter: parent.verticalCenter
                 opacity: root.outputMuted ? 0.5 : 1.0
               }
+            }
+
+            // Status feedback line (switch result, test audio, refresh)
+            Text {
+              id: statusText
+              textFormat: Text.PlainText
+              text: root.statusMessage
+              color: root.statusType === "error" ? "#ff5555" : (root.statusType === "success" ? "#8aff8a" : Qt.darker(root.bar.foreground, 1.4))
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+              font.bold: root.statusType !== "info"
+              anchors.left: parent.left
+              anchors.right: parent.right
+              visible: root.statusVisible
+              elide: Text.ElideRight
             }
 
             CursorSurface {
@@ -842,9 +1645,9 @@ Panel {
                 anchors.leftMargin: Style.space(6)
                 anchors.rightMargin: Style.space(6)
                 minimum: 0
-                maximum: 1
-                step: 0.05
-                value: root.outputVolume
+                maximum: 150
+                step: 1
+                value: root.outputVolume * 150
                 opacity: root.outputMuted ? 0.5 : 1.0
                 enabled: !!root.sink
 
@@ -1026,9 +1829,18 @@ Panel {
     required property var node
     required property int rowIndex
 
-    readonly property bool isActive: root.sink && node && root.sink.id === node.id
+    readonly property bool isValidNode: !!node
+    readonly property bool isActive: isValidNode && root.sink && node && root.sink.id === node.id
     // Availability is advisory only (dimming); the row stays clickable.
-    readonly property bool isAvailable: root.sinkAvailable(node)
+    readonly property bool isAvailable: isValidNode && root.sinkAvailable(node)
+    readonly property bool isDsp: isValidNode && root.isDspSink(node)
+    readonly property string statusText: isValidNode
+      ? (isDsp ? (isActive ? "Active (DSP)" : (isAvailable ? "Avail (DSP)" : "Disc (DSP)"))
+      : (isActive ? "Active" : (isAvailable ? "Available" : "Disconnected")))
+      : ""
+    readonly property string statusColor: isValidNode
+      ? (isActive ? "#ffffff" : (isAvailable ? "#888888" : "#555555"))
+      : "#555555"
     hasCursor: root.cursorActive && root.focusSection === "output" && root.selectedIndex === rowIndex
     onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(sinkRow)
     current: isActive
@@ -1060,13 +1872,26 @@ Panel {
 
       Text {
         textFormat: Text.PlainText
+        text: sinkRow.statusText
+        color: sinkRow.statusColor
+        font.family: root.bar.fontFamily
+        font.pixelSize: Style.font.caption
+        font.bold: sinkRow.isActive
+        width: Style.space(96)
+        horizontalAlignment: Text.AlignRight
+        elide: Text.ElideRight
+        anchors.verticalCenter: parent.verticalCenter
+      }
+
+      Text {
+        textFormat: Text.PlainText
         text: root.nodeLabel(sinkRow.node)
         color: root.bar.foreground
         font.family: root.bar.fontFamily
         font.pixelSize: Style.font.body
         font.bold: sinkRow.isActive
         elide: Text.ElideRight
-        width: parent.width - Style.space(22) - Style.space(8)
+        width: parent.width - Style.space(22) - Style.space(96) - Style.space(16)
         anchors.verticalCenter: parent.verticalCenter
       }
     }
@@ -1080,7 +1905,7 @@ Panel {
         root.focusSection = "output"
         root.selectedIndex = sinkRow.rowIndex
       }
-      onClicked: root.setDefaultSink(sinkRow.node)
+      onClicked: root.selectSink(sinkRow.node)
     }
   }
 

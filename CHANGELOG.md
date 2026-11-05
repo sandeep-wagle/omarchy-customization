@@ -9,6 +9,21 @@ development (the "phases" the configs still comment about) is summarized in the
 
 ## [Unreleased]
 
+### Added
+
+- **Post-update auto-restore hook** (`omarchy/hooks/post-update.d/90-restore-customization.hook`)
+  — pulls this repo and re-applies every tracked config after `omarchy-update`,
+  so a refresh of `~/.config/hypr/*.lua` or the Omarchy defaults no longer
+  silently drops the customization. Logs to
+  `~/.local/state/omarchy/customization-restore.log`.
+- **Full config coverage in `install.sh`** — terminal configs, shell startup
+  dotfiles, MSI DSP/audio/headphone/voxtype systemd units, wireplumber crackle
+  fix, emulator keymap, prebuilt helper binaries, and the Omarchy hooks,
+  branding, extensions and themes. New feature types: `hardware`, `terminals`,
+  `dotfiles`.
+- **`install.sh --verify`** — reports every repo file whose installed copy has
+  drifted, and exits non-zero when drift exists.
+
 ### Fixed
 
 - **Duplicate `Virtual-1` monitor rule forced 2400x1350 software rendering**
@@ -21,11 +36,14 @@ development (the "phases" the configs still comment about) is summarized in the
 
 ### Changed
 
-- **Open/close animations off** (`hypr/looknfeel.lua`) — the per-leaf
+- **Repo synced to live hardware state** — `eDP-1` at 1920x1080@144, animations
+  and `dim_inactive` back on, audio panel and shell config refreshed. The
+  llvmpipe/KVM variant remains available in git history.
+- **Open/close animations off (KVM profile, since superseded)** (`hypr/looknfeel.lua`) — the per-leaf
   `windowsIn` / `windowsOut` fades are disabled. Each animated frame is a
   compositing pass, which is affordable on a GPU but not on llvmpipe.
   Re-enable on real GPU hardware.
-- **`dim_inactive` off** (`hypr/looknfeel.lua`) — dimming inactive windows
+- **`dim_inactive` off (KVM profile, since superseded)** (`hypr/looknfeel.lua`) — dimming inactive windows
   costs a full-screen render pass per frame. Focus remains visible via the
   frameless single-window workspace rules.
 - **`direct_scanout` back on** (`hypr/looknfeel.lua`) — was forced to 0 on

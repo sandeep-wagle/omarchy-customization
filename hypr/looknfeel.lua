@@ -30,15 +30,9 @@
 -- (windows leaf off = zero positional motion), while open/close use
 -- popin 100% (no scaling, fade only). Nothing ever slides around.
 -- User files load after the defaults, so these leaves win.
---
--- SOFTWARE-RENDERING BUILD: open/close animations are off. This config also
--- runs inside KVM, where the QXL adapter has no 3D accel and Mesa uses
--- llvmpipe, so every animated frame is a CPU software composite on two shared
--- vCPUs -- the dominant cost behind laggy typing and pointer lag. Set
--- enabled = true on a machine with a real GPU to get the fade back.
 hl.animation({ leaf = "windows", enabled = false })
-hl.animation({ leaf = "windowsIn", enabled = false })
-hl.animation({ leaf = "windowsOut", enabled = false })
+hl.animation({ leaf = "windowsIn", enabled = true, speed = 8, bezier = "default", style = "popin 100%" })
+hl.animation({ leaf = "windowsOut", enabled = true, speed = 8, bezier = "default", style = "popin 100%" })
 
 -- https://wiki.hypr.land/Configuring/Basics/Variables/#layout
 -- hl.config({
@@ -97,13 +91,7 @@ hl.config({
   },
 
   decoration = {
-    -- dim_inactive costs a full-screen render pass per frame on llvmpipe
-    -- (focused window stays bright, everything else is dimmed), so it is off
-    -- for the software-rendering build. Focus is still obvious: inactive
-    -- windows get no rounded corner and no frame on single-window
-    -- workspaces, and the active window is always the one under the cursor.
-    -- Set dim_inactive = true on a machine with a real GPU.
-    dim_inactive = false,
+    dim_inactive = true,
     dim_strength = 0.12,
   },
 })
@@ -147,18 +135,15 @@ hl.window_rule({
 -- 144Hz, so fullscreen content on the secondary can otherwise add an extra
 -- compositor frame hop to its present timeline.
 --
--- direct_scanout is ON again (was forced to 0 on 2026-10-01 while chasing a
--- fullscreen-video partial-render bug). The scanout bug was never reproduced
--- and, more importantly, direct_scanout = 0 forces Hyprland to copy the whole
--- composited output through the swapchain on every frame instead of flipping
--- straight to the display. That is affordable on a real GPU; on llvmpipe it
--- is a full-screen software copy per frame, so it was a real part of the
--- input lag seen in the KVM guest.
---
--- If the original fullscreen-video partial-render bug ever reappears on
--- GPU hardware, set direct_scanout = 0 here to re-investigate.
+-- direct_scanout is OFF (2026-10-01, bug hunt): it lets a fullscreen window
+-- on ANY output flip straight to the display, bypassing the composited
+-- swapchain -- but a fullscreen video on eDP (Brave Origin, F-key) started
+-- showing partial/blank rendering that screenshots DON'T capture and that
+-- clears on any window-state change. That is the signature of a stuck
+-- fullscreen-presentation (scanout) state, so scanout is disabled until the
+-- video-fullscreen sequence retests clean. Revert to = 1 if innocent.
 hl.config({
   render = {
-    direct_scanout = 1,
+    direct_scanout = 0,
   },
 })

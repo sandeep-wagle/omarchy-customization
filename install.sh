@@ -32,6 +32,10 @@ declare -a PAIRS=(
   "hypr/windows.lua|${HOME}/.config/hypr/windows.lua|window"
   "hypr/monitors.lua|${HOME}/.config/hypr/monitors.lua|window"
   "hypr/autostart.lua|${HOME}/.config/hypr/autostart.lua|window"
+  "hypr/envs.lua|${HOME}/.config/hypr/envs.lua|window"
+  "hypr/hyprsunset.conf|${HOME}/.config/hypr/hyprsunset.conf|window"
+  "hypr/xdph.conf|${HOME}/.config/hypr/xdph.conf|window"
+  "hypr/.luarc.json|${HOME}/.config/hypr/.luarc.json|window"
   "hypr/input.lua|${HOME}/.config/hypr/input.lua|touchpad"
   "mogtab/config.toml|${HOME}/.config/mogtab/config.toml|apps"
   "bin/mogtab|${HOME}/.local/bin/mogtab|apps"
@@ -43,16 +47,30 @@ declare -a PAIRS=(
   "bin/omarchy-emulator|${HOME}/.local/bin/omarchy-emulator|apps"
   "bin/omarchy-audio-output-volume|${HOME}/.local/bin/omarchy-audio-output-volume|apps"
   "bin/omarchy-audio-heal|${HOME}/.local/bin/omarchy-audio-heal|apps"
-  "systemd/omarchy-audio-heal.service|${HOME}/.config/systemd/user/omarchy-audio-heal.service|apps"
-  "systemd/omarchy-audio-heal.timer|${HOME}/.config/systemd/user/omarchy-audio-heal.timer|apps"
-  "wireplumber/wireplumber.conf.d/50-sof-dsp-crackle-fix.conf|${HOME}/.config/wireplumber/wireplumber.conf.d/50-sof-dsp-crackle-fix.conf|apps"
+  "bin/omarchy-audio-panel-state|${HOME}/.local/bin/omarchy-audio-panel-state|apps"
+  "bin/omarchy-headphone-switch|${HOME}/.local/bin/omarchy-headphone-switch|hardware"
   "bin/omarchy-emulator-mouse|${HOME}/.local/bin/omarchy-emulator-mouse|apps"
-  "ghostty/config|${HOME}/.config/ghostty/config|apps"
-  "src/pointer-warp.c|${HOME}/.local/src/omarchy-customization/pointer-warp.c|apps"
-  "systemd/omarchy-crash-watch.service.d/override.conf|${HOME}/.config/systemd/user/omarchy-crash-watch.service.d/override.conf|apps"
+  "bin/omarchy-emulator-keys|${HOME}/.local/bin/omarchy-emulator-keys|apps"
+  "bin/omarchy-xcursor|${HOME}/.local/bin/omarchy-xcursor|apps"
+  "bin/omarchy-pointer-warp|${HOME}/.local/bin/omarchy-pointer-warp|apps"
   "bin/omarchy-window-snap|${HOME}/.local/bin/omarchy-window-snap|apps"
   "bin/omarchy-toggle-bar-mode|${HOME}/.local/bin/omarchy-toggle-bar-mode|apps"
+  "bin/pixel|${HOME}/.local/bin/pixel|apps"
+  "bin/wlrctl|${HOME}/.local/bin/wlrctl|apps"
+  "bin/msi_dsp_service|${HOME}/.local/bin/msi_dsp_service|hardware"
   "toggles/single-window-aspect-ratio.lua|${HOME}/.local/state/omarchy/toggles/hypr/single-window-aspect-ratio.lua|apps"
+  "src/pointer-warp.c|${HOME}/.local/src/omarchy-customization/pointer-warp.c|apps"
+  "src/emulator-keys.c|${HOME}/.local/src/omarchy-customization/emulator-keys.c|apps"
+  "src/xcursor-hide.c|${HOME}/.local/src/omarchy-customization/xcursor-hide.c|apps"
+  "emulator/freefire-HEY.map|${HOME}/.config/msi-center/freefire-HEY.map|hardware"
+  "wireplumber/wireplumber.conf.d/50-sof-dsp-crackle-fix.conf|${HOME}/.config/wireplumber/wireplumber.conf.d/50-sof-dsp-crackle-fix.conf|hardware"
+  "systemd/msi-dsp.service|${HOME}/.config/systemd/user/msi-dsp.service|hardware"
+  "systemd/omarchy-audio-heal.service|${HOME}/.config/systemd/user/omarchy-audio-heal.service|hardware"
+  "systemd/omarchy-audio-heal.timer|${HOME}/.config/systemd/user/omarchy-audio-heal.timer|hardware"
+  "systemd/omarchy-headphone-switch.service|${HOME}/.config/systemd/user/omarchy-headphone-switch.service|hardware"
+  "systemd/omarchy-crash-watch.service.d/override.conf|${HOME}/.config/systemd/user/omarchy-crash-watch.service.d/override.conf|hardware"
+  "voxtype/config.toml|${HOME}/.config/voxtype/config.toml|hardware"
+  "systemd/voxtype.service|${HOME}/.config/systemd/user/voxtype.service|hardware"
   "omarchy/shell.json|${HOME}/.config/omarchy/shell.json|shell"
   "omarchy/shell.toml|${HOME}/.config/omarchy/shell.toml|shell"
   "omarchy/plugins/bar-auto-hide/manifest.json|${HOME}/.config/omarchy/plugins/bar-auto-hide/manifest.json|shell"
@@ -68,17 +86,47 @@ declare -a PAIRS=(
   "omarchy/plugins/com.sandy.audio/manifest.json|${HOME}/.config/omarchy/plugins/com.sandy.audio/manifest.json|shell"
   "omarchy/plugins/com.sandy.audio/Panel.qml|${HOME}/.config/omarchy/plugins/com.sandy.audio/Panel.qml|shell"
   "omarchy/plugins/com.sandy.audio/Model.js|${HOME}/.config/omarchy/plugins/com.sandy.audio/Model.js|shell"
+  "omarchy/hooks/post-update.d/90-restore-customization.hook|${HOME}/.config/omarchy/hooks/post-update.d/90-restore-customization.hook|shell"
+  "omarchy/hooks/post-update.d/install-voxtype.hook|${HOME}/.config/omarchy/hooks/post-update.d/install-voxtype.hook|shell"
+  "omarchy/hooks/post-update.d/setup-agent.hook|${HOME}/.config/omarchy/hooks/post-update.d/setup-agent.hook|shell"
+  "omarchy/hooks/post-update.d/setup-fingerprint.hook|${HOME}/.config/omarchy/hooks/post-update.d/setup-fingerprint.hook|shell"
+  "omarchy/hooks/post-update.d/show-update-notification.sample|${HOME}/.config/omarchy/hooks/post-update.d/show-update-notification.sample|shell"
+  "omarchy/hooks/battery-low.d/play-warning-sound.sample|${HOME}/.config/omarchy/hooks/battery-low.d/play-warning-sound.sample|shell"
+  "omarchy/hooks/font-set.d/show-font-notification.sample|${HOME}/.config/omarchy/hooks/font-set.d/show-font-notification.sample|shell"
+  "omarchy/hooks/post-boot.d/weather.sample|${HOME}/.config/omarchy/hooks/post-boot.d/weather.sample|shell"
+  "omarchy/hooks/pre-refresh-pacman.d/add-custom-repo.sample|${HOME}/.config/omarchy/hooks/pre-refresh-pacman.d/add-custom-repo.sample|shell"
+  "omarchy/hooks/theme-set.d/show-theme-notification.sample|${HOME}/.config/omarchy/hooks/theme-set.d/show-theme-notification.sample|shell"
+  "omarchy/extensions/omarchy-menu.jsonc|${HOME}/.config/omarchy/extensions/omarchy-menu.jsonc|shell"
+  "omarchy/branding/about.txt|${HOME}/.config/omarchy/branding/about.txt|shell"
+  "omarchy/branding/screensaver.txt|${HOME}/.config/omarchy/branding/screensaver.txt|shell"
+  "omarchy/themed/alacritty.toml.tpl.sample|${HOME}/.config/omarchy/themed/alacritty.toml.tpl.sample|shell"
+  "omarchy/defaults/agent|${HOME}/.config/omarchy/defaults/agent|shell"
+  "terminals/alacritty.toml|${HOME}/.config/alacritty/alacritty.toml|terminals"
+  "terminals/foot.ini|${HOME}/.config/foot/foot.ini|terminals"
+  "terminals/kitty.conf|${HOME}/.config/kitty/kitty.conf|terminals"
+  "ghostty/config|${HOME}/.config/ghostty/config|terminals"
+  "terminals/chromium-flags.conf|${HOME}/.config/chromium-flags.conf|terminals"
+  "dotfiles/.bashrc|${HOME}/.bashrc|dotfiles"
+  "dotfiles/.bash_profile|${HOME}/.bash_profile|dotfiles"
+  "dotfiles/.profile|${HOME}/.profile|dotfiles"
+  "dotfiles/.zshenv|${HOME}/.zshenv|dotfiles"
+  "dotfiles/.zshrc|${HOME}/.zshrc|dotfiles"
+  "dotfiles/.XCompose|${HOME}/.XCompose|dotfiles"
+  "dotfiles/starship.toml|${HOME}/.config/starship.toml|dotfiles"
   "docs/OMARCHY_KEYBINDINGS_REFERENCE.md|${HOME}/OMARCHY_KEYBINDINGS_REFERENCE.md|docs"
 )
 
 # feature type -> human label (menu order)
-declare -a TYPE_ORDER=(everything touchpad window shell apps docs)
+declare -a TYPE_ORDER=(everything touchpad window shell apps hardware terminals dotfiles docs)
 declare -A TYPE_LABEL=(
   [everything]="Everything (full install)"
   [touchpad]="Reversed touchpad gestures"
   [window]="Hyprland: bindings, Alt-Tab switcher, Super+P display, monitors"
   [shell]="Omarchy shell: display/audio panels, taskbar, bar plugins"
   [apps]="Helper CLIs: omarchy-switch, omarchy-display-mode, toggles"
+  [hardware]="MSI DSP, audio/headphone units, wireplumber fix, voxtype, emulator map"
+  [terminals]="Terminal configs: ghostty, alacritty, foot, kitty, chromium flags"
+  [dotfiles]="Shell startup files and starship prompt"
   [docs]="Documentation"
 )
 
@@ -94,6 +142,7 @@ Usage:
   ./install.sh --list           list the available feature types
   ./install.sh --apply          install everything
   ./install.sh --apply <type>   install only one feature type
+  ./install.sh --verify         compare repo files with installed files
   ./install.sh --revert         restore the backups taken by --apply
 EOF
 }
@@ -210,7 +259,15 @@ apply() {
     "${HOME}/.local/bin/omarchy-fullscreen-watch"   "${HOME}/.local/bin/omarchy-emulator" \
     "${HOME}/.local/bin/omarchy-emulator-mouse" \
     "${HOME}/.local/bin/omarchy-audio-output-volume" \
-    "${HOME}/.local/bin/omarchy-audio-heal" 2>/dev/null || true
+    "${HOME}/.local/bin/omarchy-audio-heal" \
+    "${HOME}/.local/bin/omarchy-audio-panel-state" \
+    "${HOME}/.local/bin/omarchy-emulator-keys" \
+    "${HOME}/.local/bin/omarchy-xcursor" \
+    "${HOME}/.local/bin/omarchy-pointer-warp" \
+    "${HOME}/.local/bin/omarchy-headphone-switch" \
+    "${HOME}/.local/bin/pixel" \
+    "${HOME}/.local/bin/wlrctl" \
+    "${HOME}/.local/bin/msi_dsp_service" 2>/dev/null || true
   if [ "$changed" -gt 0 ]; then
     info "Reloading Hyprland config..."
     hyprctl reload >/dev/null 2>&1 || true
@@ -224,8 +281,39 @@ apply() {
       systemctl --user daemon-reload >/dev/null 2>&1 || true
       systemctl --user try-restart omarchy-crash-watch.service >/dev/null 2>&1 || true
     fi
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+    for unit in msi-dsp.service omarchy-headphone-switch.service omarchy-audio-heal.timer voxtype.service; do
+      systemctl --user enable --now "$unit" >/dev/null 2>&1 || true
+    done
   fi
   ok "Done. $changed file(s) installed."
+}
+
+verify() {
+  # Compare every repo file with its installed counterpart.
+  local drift=0 missing=0 pair rel rest dest src
+  for pair in "${PAIRS[@]}"; do
+    rel="${pair%%|*}"
+    rest="${pair#*|}"
+    dest="${rest%%|*}"
+    src="$SCRIPT_DIR/$rel"
+    if [ ! -f "$src" ]; then
+      warn "MISSING-IN-REPO $rel"
+      drift=$((drift + 1))
+    elif [ ! -f "$dest" ]; then
+      warn "NOT-INSTALLED   $dest"
+      missing=$((missing + 1))
+    elif ! cmp -s "$src" "$dest"; then
+      warn "DIFF            $dest"
+      drift=$((drift + 1))
+    fi
+  done
+  if [ "$drift" -eq 0 ] && [ "$missing" -eq 0 ]; then
+    ok "No drift: every repo file matches its installed copy."
+  else
+    warn "Drift: $drift changed, $missing not installed."
+    return 1
+  fi
 }
 
 revert() {
@@ -281,6 +369,9 @@ case "${MODE}" in
     fi
     info "Installing feature: ${TYPE_LABEL[$t]}"
     pairs_for "$t" | apply
+    ;;
+  --verify)
+    verify
     ;;
   --revert)
     revert

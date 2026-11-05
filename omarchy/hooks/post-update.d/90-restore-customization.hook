@@ -1,0 +1,59 @@
+#!/bin/bash
+# Re-apply Sandy's Omarchy customization after an Omarchy update.
+#
+# omarchy-update runs every executable file in
+# ~/.config/omarchy/hooks/post-update.d/ after the update and migration
+# steps. This hook pulls the customization repo (best effort) and re-installs
+# every tracked config on top of the freshly refreshed defaults.
+#
+# The install script takes a timestamped backup before it writes anything,
+# so a bad restore can be rolled back with install.sh --revert.
+
+set -u
+
+REPO="${OMARCHY_CUSTOMIZATION_DIR:-$HOME/omarchy-customization}"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy"
+LOG="$STATE_DIR/customization-restore.log"
+
+mkdir -p "$STATE_DIR"
+
+log() {
+  printf '[%s] %s\n' "$(date -Is)" "$*"
+}
+
+{
+  log "post-update restore starting"
+
+  if [ ! -x "$REPO/install.sh" ]; then
+    log "ERROR: $REPO/install.sh not found; cannot restore customization"
+    exit 0
+  fi
+
+  if [ -d "$REPO/.git" ]; then
+    if timeout 15 git -C "$REPO" pull --ff-only --quiet; then
+      log "repo updated from origin"
+    else
+      log "WARN: git pull skipped or failed; restoring the local checkout"
+    fi
+  fi
+
+  "$REPO/install.sh" --apply everything
+  status=$?
+
+  if [ "$status" -eq 0 ]; then
+    log "restore complete"
+  else
+    log "ERROR: restore exited with status $status"
+  fi
+} >>"$LOG" 2>&1
+
+last="$(tail -n 1 "$LOG" 2>/dev/null)"
+if [ -x /usr/share/omarchy/bin/omarchy-notification-send ]; then
+  if [[ "$last" == *"restore complete"* ]]; then
+    omarchy-notification-send "Omarchy customization restored" "$last" 2>/dev/null || true
+  else
+    omarchy-notification-send "Omarchy customization restore FAILED" "See $LOG" 2>/dev/null || true
+  fi
+fi
+
+exit 0

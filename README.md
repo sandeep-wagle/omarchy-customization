@@ -331,12 +331,31 @@ feature. The feature types are listed by `./install.sh --list`:
 - `touchpad` — `hypr/input.lua` → `~/.config/hypr/` (**reversed touchpad gestures**)
 - `shell` — `omarchy/shell.json`, `omarchy/shell.toml`, `omarchy/plugins/*` → `~/.config/omarchy/`
 - `apps` — `bin/*` → `~/.local/bin/` (made executable), `mogtab/config.toml`, `toggles/*`
+- `hardware` — MSI DSP/audio/headphone systemd units, wireplumber crackle fix, voxtype, emulator keymap
+- `terminals` — `ghostty`, `alacritty`, `foot`, `kitty`, `chromium-flags.conf`
+- `dotfiles` — shell startup files (`.bashrc`, `.profile`, `.zshenv`, `.zshrc`, `.XCompose`) and `starship.toml`
 - `docs` — keybinding reference → `~/OMARCHY_KEYBINDINGS_REFERENCE.md`
 - `everything` — all of the above (`./install.sh --apply` is the short form)
 
 Any file that differs from the repo is first backed up to a fresh timestamped
 directory, then overwritten; a changed install ends with `hyprctl reload` and a
-`mogtab` restart (if running).
+`mogtab` restart (if running). `./install.sh --verify` reports any repo file
+that no longer matches its installed copy.
+
+### Survive an Omarchy update
+
+`omarchy-update` refreshes `~/.config/hypr/*.lua` and other defaults, which
+would otherwise drop these tweaks. The installed post-update hook
+(`~/.config/omarchy/hooks/post-update.d/90-restore-customization.hook`) pulls
+this repo and re-runs `install.sh --apply everything` after every update. The
+hook logs to `~/.local/state/omarchy/customization-restore.log`.
+
+If an update ever removes the hook, restore it with:
+
+```sh
+git clone https://github.com/sandeep-wagle/omarchy-customization.git ~/omarchy-customization
+~/omarchy-customization/install.sh --apply everything
+```
 
 ### Verify
 - The top bar shows the taskbar in its left section.

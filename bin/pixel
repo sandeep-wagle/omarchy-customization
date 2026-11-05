@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+
+AVD="Pixel_10_Pro"
+EMULATOR="$HOME/Android/Sdk/emulator/emulator"
+
+echo "Starting AVD '$AVD'..."
+
+exec "$EMULATOR" \
+    -avd "$AVD" \
+    -no-snapshot \
+    -gpu host

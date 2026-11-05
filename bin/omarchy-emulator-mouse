@@ -2,10 +2,13 @@
 # omarchy-emulator-mouse -- BlueStacks-style mouse capture for the Android
 # emulator window (Free Fire / Pixel AVD).
 #
-# Model: a "locked" pointer is clamped inside the focused emulator window by a
-# small watcher loop (warps via omarchy-pointer-warp). Nothing is grabbed
-# at the Wayland level; the clamp simply pulls the cursor back to the window
-# edge whenever it strays out (~30ms poll).
+# Model: while locked, an LMB hold turns every mouse motion into a
+# touch-drag (drag-look: camera follows the mouse, BlueStacks shooting-mode
+# feel), the cursor is hidden on the emulator windows, and a watcher loop
+# lift-recenters at the window edges (button-up, warp to center with no
+# contact, press again) for infinite look range with zero camera snap-back.
+# Nothing is grabbed at the Wayland level; unlock/suspend/Alt+Tab always
+# end the drag first, then free the pointer.
 #
 #   lock     -- confine to the focused emulator window (refuses elsewhere)
 #   unlock   -- release (also runs automatically on Alt+Tab away / close)
@@ -27,15 +30,24 @@ set -u
 HYPR=/usr/bin/hyprctl
 WARP="${HOME}/.local/bin/omarchy-pointer-warp"
 WLRCTL="${HOME}/.local/bin/wlrctl"
+XCURSOR="${HOME}/.local/bin/omarchy-xcursor"
+KEYS="${HOME}/.local/bin/omarchy-emulator-keys"
+KEYS_MAP="${HOME}/.config/msi-center/freefire-HEY.map"
 STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/omarchy-emulator-mouse"
+KEYS_PID="$STATE_DIR/keys.pid"
 LOCK_FILE="$STATE_DIR/locked"
 SUSPEND_FILE="$STATE_DIR/suspended"
 PID_FILE="$STATE_DIR/watcher.pid"
 HOLDER_PID="$STATE_DIR/holder.pid"
+RECENTER_FILE="$STATE_DIR/recenters"
 GUARD_FILE="$STATE_DIR/fwd-guard"
 INVOC_LOG="$STATE_DIR/invocations.log"
 POLL=0.03
 MARGIN=2
+# Lift-recenter band: cursor this close (px) to a window border triggers a
+# lift (button-up), warp to center, press again -- infinite look range with
+# no camera snap-back (warps only ever happen with no contact held).
+EDGE=48
 
 mkdir -p "$STATE_DIR" 2>/dev/null
 
@@ -110,6 +122,24 @@ warp_global() {
   "$WARP" "$rx" "$ry" "$iw" "$ih" 2>/dev/null
 }
 
+# Emulator host PID (both its windows share it) for the cursor tool.
+emulator_pid() {
+  $HYPR clients -j 2>/dev/null |
+    jq -r '[.[] | select(.class == "Emulator") | .pid][0] // empty'
+}
+
+hide_cursor() {
+  local pid
+  pid=$(emulator_pid)
+  [[ -n $pid ]] && "$XCURSOR" hide "$pid" >/dev/null 2>&1
+}
+
+show_cursor() {
+  local pid
+  pid=$(emulator_pid)
+  [[ -n $pid ]] && "$XCURSOR" show "$pid" >/dev/null 2>&1
+}
+
 cursorpos() {
   $HYPR cursorpos 2>/dev/null | tr -d ' ' | tr ',' ' '
 }
@@ -152,12 +182,38 @@ stop_hold() {
   "$WARP" release 2>/dev/null || true
 }
 
+# Key injector lifecycle (WASD Dpad + taps + LMB-fire). Follows the capture
+# lock: grabbed keys only exist while locked, so menus/typing are untouched.
+start_keys() {
+  stop_keys quiet
+  if [[ -x $KEYS && -f $KEYS_MAP ]]; then
+    setsid "$KEYS" "$KEYS_MAP" emulator-5554 &>/dev/null &
+    echo $! >"$KEYS_PID"
+  fi
+}
+
+stop_keys() {
+  if [[ -f $KEYS_PID ]]; then
+    local pid
+    pid=$(cat "$KEYS_PID" 2>/dev/null)
+    # TERM first (lets it release contacts + ungrab), KILL as backstop.
+    [[ -n $pid ]] && kill -TERM "$pid" 2>/dev/null
+    sleep 0.2
+    [[ -n $pid ]] && kill -KILL "$pid" 2>/dev/null
+    rm -f "$KEYS_PID"
+  fi
+  # Bracket trick: matches the daemon's "keys" but never our own cmdline.
+  pkill -f 'omarchy-emulator-key[s]' 2>/dev/null || true
+}
+
 do_unlock() {
   local quiet="${1:-}"
   echo 0 >"$LOCK_FILE"
   rm -f "$SUSPEND_FILE"
   stop_hold
   stop_watcher
+  stop_keys
+  show_cursor
   [[ $quiet != quiet ]] && notify "Mouse released"
 }
 
@@ -192,6 +248,24 @@ do_watch() {
     mon=$(jq -r '.monitor' <<<"$foc")
     local cx cy
     read -r cx cy <<<"$(cursorpos)"
+    # Lift-recenter band: near a border, lift the drag (button-up at the
+    # edge ends it without triggering anything), warp to center with no
+    # contact held, press again. Result: infinite look range, zero camera
+    # snap-back (warps never happen mid-drag), and the press always lands
+    # on neutral ground. The ~0.2s cycle only fires at the band.
+    if ((cx < ax + EDGE || cy < ay + EDGE ||
+         cx > ax + aw - 1 - EDGE || cy > ay + ah - 1 - EDGE)); then
+      stop_hold
+      warp_global $((ax + aw / 2)) $((ay + ah / 2)) "$mon"
+      start_hold
+      local n
+      n=$(cat "$RECENTER_FILE" 2>/dev/null || echo 0)
+      echo $((n + 1)) >"$RECENTER_FILE"
+      sleep "$POLL"
+      continue
+    fi
+    # Fallback safety clamp (should rarely fire now): keep the pointer from
+    # ever leaving the window between polls.
     local nx=$cx ny=$cy moved=0
     if ((cx < ax + MARGIN)); then nx=$((ax + MARGIN)); moved=1; fi
     if ((cy < ay + MARGIN)); then ny=$((ay + MARGIN)); moved=1; fi
@@ -219,14 +293,17 @@ do_lock() {
   jq -r '.address' <<<"$foc" >"$STATE_DIR/addr"
   rm -f "$SUSPEND_FILE"
   echo 1 >"$LOCK_FILE"
-  # Start centered (so the first clamp never yanks), THEN press-and-hold:
-  # from here every mouse motion is a touch-drag, i.e. the game camera
-  # follows the mouse with no button pressed.
+  echo 0 >"$RECENTER_FILE"
+  # Start centered (so the first clamp never yanks), press-and-hold for
+  # drag-look, and hide the cursor on the emulator windows (shooting-mode
+  # feel: invisible pointer, camera follows the mouse).
   warp_global $((ax + aw / 2)) $((ay + ah / 2)) "$mon"
   start_hold
+  hide_cursor
+  start_keys
   setsid "$0" watch &>/dev/null &
   echo $! >"$PID_FILE"
-  notify "Mouse locked, drag-look ON (TAB releases, hold Super+X for desktop)"
+  notify "Mouse locked, cursor hidden, drag-look ON (TAB releases, hold Super+X for desktop)"
   echo "locked"
 }
 
