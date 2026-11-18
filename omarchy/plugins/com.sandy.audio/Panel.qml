@@ -181,6 +181,16 @@ Panel {
   // speakers (that assumption is what left "Speakers" selected after a reboot
   // with the headphones plugged in).
   property bool storedModeKnown: false
+  // Anti-oscillation guards. The card profile, the state file, the DSP service
+  // and the jack probe all feed each other, so a single stale read used to
+  // start a loop that flipped the output every few hundred ms. Every one of
+  // those paths now has to wait out a quiet period before it may act again.
+  property double lastModeWriteAt: 0
+  property string lastProfilePort: ""
+  property double lastProfileAt: 0
+  property double lastJackChangeAt: 0
+  property bool lastServiceDsp: false
+  property double lastServiceDspAt: 0
   readonly property bool headphonesConnected: panelRoot.headphonesJackPresent
 
   // When no headphones are connected the panel only offers Speakers, so mode
@@ -249,6 +259,14 @@ Panel {
   // between the internal speakers and the headphones jack. The helper script
   // is idempotent: it does nothing when the right profile is already active.
   function ensureOutputProfile(port) {
+    // A profile restart tears down every sink, so it must never run twice for
+    // the same target in quick succession: that is an audible gap and, for
+    // some players, a paused stream. The helper is idempotent; this guard only
+    // stops repeat launches of it.
+    var now = Date.now()
+    if (port === panelRoot.lastProfilePort && now - panelRoot.lastProfileAt < 3000) return
+    panelRoot.lastProfilePort = port
+    panelRoot.lastProfileAt = now
     Quickshell.execDetached(["bash", "-lc",
       "\"$HOME/.config/omarchy/plugins/com.sandy.audio/switch-output-profile\" " + port])
   }
@@ -387,6 +405,7 @@ Panel {
     panelRoot.captureOutputState()
     panelRoot.beginOutputSwitch(mode === "headphones" ? "Headphones" : "Speaker")
     audioSourceMode = mode
+    panelRoot.lastModeWriteAt = Date.now()
     panelRoot.persistState("mode", mode)
     panelRoot.dspEnabled = panelRoot.dspForMode(panelRoot.effectiveMode)
     panelRoot.dspUserSet = true
@@ -416,7 +435,13 @@ Panel {
   property bool serviceDspState: false
 
   function syncServiceDsp(on) {
+    var now = Date.now()
     if (panelRoot.serviceDspKnown && panelRoot.serviceDspState === on) return
+    // The service switches the default sink when it flips, so a rapid alternation
+    // here is a second oscillation source. Ignore flips inside the quiet window.
+    if (now - panelRoot.lastServiceDspAt < 3000 && panelRoot.lastServiceDsp !== on) return
+    panelRoot.lastServiceDspAt = now
+    panelRoot.lastServiceDsp = on
     panelRoot.serviceDspKnown = true
     panelRoot.serviceDspState = on
     var cmd = "mkdir -p \"$HOME/.config/msi-center\"; printf '" + (on ? "1" : "0")
@@ -489,7 +514,9 @@ Panel {
       var key = line.substring(0, eq)
       var value = line.substring(eq + 1)
       if (key === "mode" && (value === "speakers" || value === "headphones")) {
-        audioSourceMode = value
+        // Persistence is asynchronous, so a read can arrive after a newer
+        // decision was already made. Let the newer one win.
+        if (Date.now() - panelRoot.lastModeWriteAt > 2000) audioSourceMode = value
         panelRoot.storedModeKnown = true
       }
       // Older state files may still hold the removed "both" mode. Headphones is
@@ -574,8 +601,14 @@ Panel {
       }
     } else if (present === wasPresent) {
       return
+    } else if (Date.now() - panelRoot.lastJackChangeAt < 2000) {
+      // A reading that contradicts the one just acted on is a probe artifact
+      // (card reconfiguring during a profile switch), not a real plug event.
+      return
     }
 
+    panelRoot.lastJackChangeAt = Date.now()
+    panelRoot.lastModeWriteAt = Date.now()
     panelRoot.beginOutputSwitch(present ? "Headphones" : "Speaker")
     panelRoot.audioSourceMode = present ? "headphones" : "speakers"
     panelRoot.persistState("mode", panelRoot.audioSourceMode)
