@@ -86,35 +86,53 @@ function isHeadphones(node) {
     || blob.indexOf("airpod") !== -1
 }
 
+// Font Awesome glyphs (U+F0xx) ship in every Nerd Font build and match the
+// bar's own icon set. The Material Design range renders as tiny boxes at
+// caption size on this font, so device rows use these instead.
 function sinkGlyph(node) {
-  if (!node) return "󰓃"
-  if (isHeadphones(node)) return "󰋋"
+  if (!node) return "\uf028"
+  if (isHeadphones(node)) return "\uf025"
   var p = nodeProps(node)
   var blob = String([
     node.name, node.description, node.nickname,
     p["device.icon-name"] || "",
     p["device.product.name"] || ""
   ].join(" ")).toLowerCase()
-  if (blob.indexOf("bluetooth") !== -1) return "󰂯"
-  if (blob.indexOf("hdmi") !== -1 || blob.indexOf("display") !== -1) return "󰍹"
-  return "󰓃"
+  if (blob.indexOf("bluetooth") !== -1) return "\uf293"
+  if (blob.indexOf("hdmi") !== -1 || blob.indexOf("display") !== -1) return "\uf108"
+  return "\uf028"
 }
 
 function sourceGlyph(node) {
-  if (!node) return "󰍬"
+  if (!node) return "\uf130"
   var p = nodeProps(node)
   var blob = String([
     node.name, node.description, node.nickname,
     p["device.icon-name"] || ""
   ].join(" ")).toLowerCase()
-  if (blob.indexOf("headset") !== -1) return "󰋋"
-  if (blob.indexOf("bluetooth") !== -1) return "󰂯"
-  if (blob.indexOf("webcam") !== -1 || blob.indexOf("camera") !== -1) return "󰄀"
-  return "󰍬"
+  if (blob.indexOf("headset") !== -1) return "\uf025"
+  if (blob.indexOf("bluetooth") !== -1) return "\uf293"
+  if (blob.indexOf("webcam") !== -1 || blob.indexOf("camera") !== -1) return "\uf03d"
+  return "\uf130"
+}
+
+// PipeWire exposes raw node names like "PipeWire ALSA [voxtype-onnx-cuda-13]".
+// Strip that wrapper only; application/media names can legitimately contain
+// brackets and underscores, so leave them alone.
+function cleanStreamLabel(text) {
+  var label = String(text || "").trim()
+  if (!label) return ""
+  if (/^PipeWire\s+ALSA\b/i.test(label)) {
+    label = label.replace(/^PipeWire\s+ALSA\s*/i, "")
+    var bracketed = label.match(/^\[([^\]]+)\]$/)
+    if (bracketed) label = bracketed[1]
+    label = label.replace(/_+/g, " ")
+  }
+  return label.replace(/\s+/g, " ").trim()
 }
 
 function friendlyStreamLabel(label) {
-  label = String(label || "").trim()
+  label = cleanStreamLabel(label)
   if (!label) return ""
 
   var known = {
@@ -135,11 +153,21 @@ function streamLabelIsGeneric(label) {
 function rawStreamLabel(node) {
   if (!node) return ""
   var p = nodeProps(node)
-  return p["application.name"]
-    || node.description
-    || p["media.name"]
-    || p["node.name"]
-    || node.name
+  // Prefer what the client publishes over the PipeWire node name. The node
+  // name is last because it is the raw "PipeWire ALSA [...]" plumbing.
+  var candidates = [
+    p["application.name"],
+    p["media.name"],
+    node.description,
+    p["node.description"],
+    p["node.name"],
+    node.name
+  ]
+  for (var i = 0; i < candidates.length; i++) {
+    var label = cleanStreamLabel(candidates[i])
+    if (label) return label
+  }
+  return ""
 }
 
 function mprisPlayerLabel(player) {
@@ -246,6 +274,7 @@ if (typeof module !== "undefined") {
     isHeadphones: isHeadphones,
     sinkGlyph: sinkGlyph,
     sourceGlyph: sourceGlyph,
+    cleanStreamLabel: cleanStreamLabel,
     friendlyStreamLabel: friendlyStreamLabel,
     streamLabelKey: streamLabelKey,
     streamLabelIsGeneric: streamLabelIsGeneric,

@@ -17,6 +17,13 @@ case "$cmd" in
     val="${3:-}"
     [[ -n $key ]] || exit 1
     mkdir -p "$(dirname "$FILE")"
+    # The panel writes several keys at once (mode, dsp_*, output_*). Without a
+    # lock those writes race: each one reads the file, edits its own key, and
+    # renames the result over the file, so the last writer silently discards
+    # every key the others just added. That wiped `mode` and made the next boot
+    # fall back to speakers. Serialize the read-modify-write instead.
+    exec 9>"$FILE.lock"
+    flock 9
     tmp="$(mktemp)"
     if [[ -f $FILE ]]; then
       awk -F= -v k="$key" -v v="$val" '
@@ -29,6 +36,7 @@ case "$cmd" in
       printf '%s=%s\n' "$key" "$val" >"$tmp"
     fi
     mv "$tmp" "$FILE"
+    flock -u 9
     ;;
   all)
     [[ -f $FILE ]] && cat "$FILE"

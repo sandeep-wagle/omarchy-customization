@@ -1,0 +1,41 @@
+#!/bin/bash
+# Switch the sound card profile so the requested physical port becomes the
+# active output. On this HDA codec the Speaker and Headphones ports live in
+# mutually exclusive profiles, so "select the other output" means switching the
+# card profile, not merely changing the default sink.
+#
+# Usage: switch-output-profile <Speaker|Headphones>
+set -euo pipefail
+
+port="${1:-}"
+case "$port" in
+  Speaker|Headphones) ;;
+  *)
+    echo "usage: switch-output-profile <Speaker|Headphones>" >&2
+    exit 2
+    ;;
+esac
+
+# The one card that exposes both an analog Speaker and a Headphones port.
+card=$(pactl -f json list cards |
+  jq -r '.[] | select(.profiles | keys | join(" ") | test("Speaker|Headphones")) | .name' |
+  head -1)
+[[ -n $card ]] || exit 0
+
+active=$(pactl -f json list cards |
+  jq -r --arg c "$card" '.[] | select(.name==$c) | .active_profile')
+profiles=$(pactl -f json list cards |
+  jq -r --arg c "$card" '.[] | select(.name==$c) | .profiles | keys[]')
+
+# Prefer a profile that carries the wanted port and NOT the other one, so the
+# two outputs stay mutually exclusive on cards that offer such profiles.
+if [[ $port == "Speaker" ]]; then
+  target=$(printf '%s\n' "$profiles" | grep -i speaker | grep -iv headphone | head -1 || true)
+  [[ -n $target ]] || target=$(printf '%s\n' "$profiles" | grep -i speaker | head -1 || true)
+else
+  target=$(printf '%s\n' "$profiles" | grep -i headphone | grep -iv speaker | head -1 || true)
+  [[ -n $target ]] || target=$(printf '%s\n' "$profiles" | grep -i headphone | head -1 || true)
+fi
+
+[[ -n $target && $target != "$active" ]] || exit 0
+exec pactl set-card-profile "$card" "$target"
