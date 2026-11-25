@@ -53,7 +53,7 @@ jobs:
             -o "dist/${{ steps.meta.outputs.archive }}" HEAD
           (cd dist && sha256sum ./*.tar.gz >SHA256SUMS)
           cat dist/SHA256SUMS
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist
           path: dist/
