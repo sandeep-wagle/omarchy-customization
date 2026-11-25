@@ -32,13 +32,31 @@ import threading
 import time
 from pathlib import Path
 
-import gi
+Gtk = Gdk = GdkPixbuf = GLib = Gio = None
 
-gi.require_version("Gtk", "4.0")
-gi.require_version("Gdk", "4.0")
-gi.require_version("GdkPixbuf", "2.0")
-gi.require_version("Gio", "2.0")
-from gi.repository import Gtk, Gdk, GdkPixbuf, GLib, Gio
+
+def load_gi():
+    """Import GTK lazily, and only where a window or image is actually used.
+
+    The hot CLI paths (`open`, `move`, `close`, `cancel`) just talk to the
+    running picker over its socket. Importing GTK there cost ~40 ms on every
+    Alt+Tab press for no benefit, so it is deferred to the GUI/cache paths.
+    """
+    global Gtk, Gdk, GdkPixbuf, GLib, Gio
+    if Gtk is not None:
+        return
+    import gi
+
+    gi.require_version("Gtk", "4.0")
+    gi.require_version("Gdk", "4.0")
+    gi.require_version("GdkPixbuf", "2.0")
+    gi.require_version("Gio", "2.0")
+    from gi.repository import Gtk as _Gtk, Gdk as _Gdk
+    from gi.repository import GdkPixbuf as _GdkPixbuf
+    from gi.repository import GLib as _GLib, Gio as _Gio
+
+    Gtk, Gdk, GdkPixbuf, GLib, Gio = _Gtk, _Gdk, _GdkPixbuf, _GLib, _Gio
+
 
 NAME = "omarchy.switch"
 HOME = os.path.expanduser("~")
@@ -60,7 +78,7 @@ FOOTER_H = 50
 ROW_H = CARD_H + FOOTER_H
 BX = 8
 MX = 12
-PICKER_DWELL_MS = 140
+PICKER_DWELL_MS = 50
 SEL_CLASS = "sel"
 
 
@@ -232,6 +250,10 @@ def window_items(mon=None):
         on_view = ws == cur_ws and not w.get("hidden", False)
         previewable = on_view and not (any_fs and fs <= 0)
         name, icon = app_info(w.get("class") or "")
+        try:
+            focus = int(w.get("focusHistoryID", -1))
+        except (TypeError, ValueError):
+            focus = -1
         items.append({
             "address": w.get("address"),
             "class": w.get("class") or "",
@@ -244,14 +266,26 @@ def window_items(mon=None):
             "on_view": on_view,
             "previewable": previewable,
             "ws": ws,
+            "focus": focus,
         })
-    items.sort(key=lambda i: (not i["on_view"], i["address"]))
-    a = active_addr()
-    if a:
-        for k, it in enumerate(items):
-            if it["address"] == a:
-                items.insert(0, items.pop(k))
-                break
+    # Most-recently-focused first. Hyprland's focusHistoryID is 0 for the
+    # current window and grows with age (-1 = never focused), so one Alt+Tab
+    # lands on the previous app and holding Alt walks the MRU list — the
+    # standard switcher behaviour — instead of following an arbitrary address
+    # order. It also saves the extra `hyprctl activewindow` call per open.
+    if any(it["focus"] >= 0 for it in items):
+        items.sort(key=lambda i: (i["focus"] < 0,
+                                  i["focus"] if i["focus"] >= 0 else 0,
+                                  not i["on_view"], i["address"]))
+    else:
+        # Older Hyprland without focusHistoryID: keep the active window first.
+        items.sort(key=lambda i: (not i["on_view"], i["address"]))
+        a = active_addr()
+        if a:
+            for k, it in enumerate(items):
+                if it["address"] == a:
+                    items.insert(0, items.pop(k))
+                    break
     return items
 
 
@@ -310,7 +344,10 @@ def round_tile(src):
     tw = min(256, max(48, w))
     th = max(int(tw * h / w), 24)
     try:
-        sc = src.scale_simple(tw, th, GdkPixbuf.InterpType.BILINEAR)
+        # Cached shots are stored pre-scaled (see save_pixbuf_cache), so the
+        # common path needs no resize at all.
+        sc = src if (tw, th) == (w, h) else src.scale_simple(
+            tw, th, GdkPixbuf.InterpType.BILINEAR)
     except Exception:
         sc = src
     out = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, True, 8, tw, th)
@@ -418,11 +455,18 @@ def load_cached_pixbuf(addr):
 
 
 def save_pixbuf_cache(pb, addr):
-    """Persist a pixbuf thumbnail for later switcher opens (best-effort)."""
+    """Persist a pixbuf thumbnail for later switcher opens (best-effort).
+
+    Store it already scaled to card width: decoding a full-size window shot
+    on every picker open was the slowest part of building the cards.
+    """
     if pb is None or not addr:
         return
     try:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        if pb.get_width() > 256:
+            h = max(1, int(round(pb.get_height() * 256 / pb.get_width())))
+            pb = pb.scale_simple(256, h, GdkPixbuf.InterpType.BILINEAR) or pb
         pb.savev(str(cache_file(addr)), "png", [], [])
         prune_cache()
     except Exception:
@@ -467,6 +511,7 @@ def cache_window_shot(addr, delay=0.0):
     coords, which is what `grim -g` expects) and stores
     /tmp/omarchy_previews/<address>.png. Best-effort; never raises.
     """
+    load_gi()
     try:
         if delay:
             time.sleep(delay)
@@ -579,27 +624,118 @@ def send_wait(line, max_wait=3.0):
 
 # ------------------------------------------------------------------ GUI ------
 class Switcher:
-    def __init__(self, items, textures, start=0):
-        self.items = items
-        self.tex = textures
-        self.idx = start % len(items) if items else 0
-        self.done = False
+    def __init__(self, items=None, textures=None, start=0):
+        self.items = items or []
+        self.tex = textures or []
+        self.idx = 0
+        # Resident between opens: the process and its GTK window stay alive,
+        # so the second and later Alt+Tabs only refresh the cards and map an
+        # already-initialised window instead of paying Python+GTK startup.
+        self.visible = False
+        self.closing = False
+        self.starting = True
+        self.gen = 0
+        self.idle_source = None
         self.cards = []
         self.pics = []
         self.win = None
+        self.mon = None
+        self.tile_w = 260
+        self.tile_h = 217
+        self.cols = 1
+        self.scroller = None
+        self._css_installed = False
         self.ready = False
         self.pending = []
         self.p_lock = threading.Lock()
         self.app = Gtk.Application.new(NAME,
                                        Gio.ApplicationFlags.FLAGS_NONE)
         self.app.connect("activate", self.on_activate)
+        # Without a hold, Gtk.Application exits once it has no windows.
+        try:
+            self.app.hold()
+        except Exception:
+            pass
 
-    def apply_preview(self, k, tex):
+    def apply_preview(self, k, tex, gen):
+        if gen != self.gen:
+            return False
         try:
             if k < len(self.pics) and self.pics[k] is not None:
                 self.pics[k].set_paintable(tex)
             if 0 <= k < len(self.tex):
                 self.tex[k] = tex
+        except Exception:
+            pass
+        return False
+
+    def open(self, delta=1):
+        """Show the picker, or move the selection when it is already open."""
+        if self.visible:
+            if not self.closing and delta:
+                self.move(delta)
+            return
+        self.closing = False
+        if self.idle_source is not None:
+            try:
+                GLib.source_remove(self.idle_source)
+            except Exception:
+                pass
+            self.idle_source = None
+        self.starting = True
+        self.ready = False
+        mon = pick_monitor()
+        self.mon = mon
+        items = window_items(mon)
+        if not items:
+            self.hide()
+            return
+        self.gen += 1
+        self.items = items
+        self.tex = [initial_texture(it) for it in items]
+        if delta > 0 and len(items) > 1:
+            self.idx = 1
+        elif delta < 0 and len(items) > 1:
+            self.idx = len(items) - 1
+        else:
+            self.idx = 0
+        threading.Thread(target=self.load_previews, args=(mon, items),
+                         daemon=True).start()
+        # Called from the socket/idle context, i.e. already on the GTK thread.
+        self.on_activate(self.app)
+
+    def hide(self):
+        """Unmap the picker, keeping the process warm for the next open."""
+        self.visible = False
+        self.ready = False
+        self.starting = False
+        with self.p_lock:
+            self.pending.clear()
+        try:
+            if self.win is not None:
+                # Destroy rather than hide: a fresh window next time gets the
+                # right size for a changed card count, and GTK init (the slow
+                # part) stays warm because the process itself is resident.
+                self.win.destroy()
+                self.win = None
+        except Exception:
+            pass
+        self._arm_idle_exit()
+
+    def _arm_idle_exit(self):
+        if self.idle_source is not None:
+            try:
+                GLib.source_remove(self.idle_source)
+            except Exception:
+                pass
+        self.idle_source = GLib.timeout_add_seconds(600, self._idle_quit)
+
+    def _idle_quit(self):
+        self.idle_source = None
+        if self.visible:
+            return False
+        try:
+            self.app.quit()
         except Exception:
             pass
         return False
@@ -614,10 +750,11 @@ class Switcher:
         window was last active); cards with no cache keep the icon tile set
         synchronously by initial_texture() — never a blank box.
         """
+        gen = self.gen
         try:
             # 1) Paint cached thumbnails for non-visible windows immediately.
             for k, it in enumerate(items):
-                if self.done:
+                if gen != self.gen:
                     return
                 if it.get("previewable"):
                     continue
@@ -626,7 +763,7 @@ class Switcher:
                     if pb is not None:
                         tex = round_tile(pb)
                         if tex is not None:
-                            GLib.idle_add(self.apply_preview, k, tex)
+                            GLib.idle_add(self.apply_preview, k, tex, gen)
                 except Exception:
                     pass
             # 2) Live-capture the visible frame, crop, display AND refresh cache.
@@ -636,7 +773,7 @@ class Switcher:
             if frame is None:
                 return
             for k, it in enumerate(items):
-                if self.done:
+                if gen != self.gen:
                     return
                 if not it.get("previewable"):
                     continue
@@ -648,7 +785,7 @@ class Switcher:
                 except Exception:
                     tex = None
                 if tex is not None:
-                    GLib.idle_add(self.apply_preview, k, tex)
+                    GLib.idle_add(self.apply_preview, k, tex, gen)
                 else:
                     # Live crop failed (occluded mid-capture): try cache.
                     try:
@@ -656,40 +793,35 @@ class Switcher:
                         if pb is not None:
                             tex2 = round_tile(pb)
                             if tex2 is not None:
-                                GLib.idle_add(self.apply_preview, k, tex2)
+                                GLib.idle_add(self.apply_preview, k, tex2, gen)
                     except Exception:
                         pass
         except Exception:
             pass
 
     def on_activate(self, app):
+        if self.win is None:
+            self._create_window(app)
+        self._build_content()
+        self.win.present()
+        self.visible = True
+        self.closing = False
+        self.starting = False
+        self.select(self.idx)
+        GLib.idle_add(self.select, self.idx)
+        GLib.idle_add(self.scroll_to, self.idx)
+        with self.p_lock:
+            self.ready = True
+            pend = list(self.pending)
+            self.pending.clear()
+        for ln in pend:
+            GLib.idle_add(handle_cmd, ln, self)
+
+    def _create_window(self, app):
         win = Gtk.ApplicationWindow(application=app)
         win.set_name("sw")
         win.set_resizable(False)
         win.set_decorated(False)
-        win.set_visible(True)
-
-        n = len(self.items)
-        width = min(6, n) * (CARD_W + BX) + MX * 2
-        win.set_default_size(width, ROW_H + MX * 2 + 8)
-
-        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
-                      spacing=BX, homogeneous=False)
-        for i, (it, tex) in enumerate(zip(self.items, self.tex)):
-            row.append(self.build_card(app, i, it, tex))
-            self.cards.append(row.get_last_child())
-
-        scroller = Gtk.ScrolledWindow()
-        scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.NEVER)
-        scroller.set_child(row)
-
-        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        outer.set_margin_top(MX)
-        outer.set_margin_bottom(MX)
-        outer.set_margin_start(MX)
-        outer.set_margin_end(MX)
-        outer.append(scroller)
-        win.set_child(outer)
 
         kc = Gtk.EventControllerKey()
         kc.connect("key-pressed", self.on_key)
@@ -704,53 +836,141 @@ class Switcher:
         win.add_controller(kc)
         # Click-outside commit: when the picker loses keyboard focus (user
         # clicked another surface), commit the highlighted card instead of
-        # leaving a stuck overlay. Guarded by self.done so teardown and the
-        # cancel path never re-enter activate().
+        # leaving a stuck overlay. Guarded by self.visible/self.closing so
+        # teardown and the cancel path never re-enter activate().
         win.connect("notify::is-active", self.on_active_changed)
 
+        if not self._css_installed:
+            self._css_installed = True
+            self._install_css()
+        self.win = win
+
+    def _install_css(self):
         css = Gtk.CssProvider()
         css.load_from_string("""
-            #sw { background-color: rgba(15,15,19,0.94); border-radius: 18px; }
-            .item { background: rgba(34,35,46,0.85); border: 2px solid rgba(255,255,255,0.07);
-                    border-radius: 16px; box-shadow: none; outline: none; }
+            #sw { background-color: transparent; border-radius: 0; }
+            .item { background: rgba(30,30,46,0.94); border: 2px solid rgba(255,255,255,0.07);
+                    border-radius: 16px; box-shadow: none; outline: none;
+                    padding: 0; min-width: 0; min-height: 0; }
             .item:focus-visible { outline: none; box-shadow: none; }
             .item:hover { border-color: rgba(255,255,255,0.20); }
             .sel { border-color: #7aa2f7; }
             #preview { background-color: rgba(0,0,0,0.35); border-radius: 12px; }
-            #pname { color: #d8dee9; font-size: 14px; font-weight: 600; }
-            #ptag { color: #6b7089; font-size: 11px; }
+            #pname { color: #d8dee9; font-size: 13px; font-weight: 600; }
+            #ptag { background: rgba(0,0,0,0.55); color: #a6adc8; font-size: 10px;
+                    border-radius: 8px; padding: 2px 8px; }
         """)
         Gtk.StyleContext.add_provider_for_display(
             Gdk.Display.get_default(), css,
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
 
-        self.win = win
-        win.present()
-        self.select(self.idx)
-        GLib.idle_add(self.select, self.idx)
-        GLib.idle_add(self.scroll_to, self.idx)
-        with self.p_lock:
-            self.ready = True
-            pend = list(self.pending)
-            self.pending.clear()
-        for ln in pend:
-            GLib.idle_add(handle_cmd, ln, self)
+    @staticmethod
+    def tile_layout(n, max_w, max_h, gap=14):
+        """Largest tile that lets all n windows fit inside max_w x max_h.
+
+        Tries big tiles first (280px) and steps down 10px at a time; at each
+        size the columns are whatever fits the 80% width, so the grid only
+        wraps when it has to. This replaces fixed breakpoints, which made a
+        5th window snap every tile noticeably smaller.
+        """
+        last = (120, int(round(120 * 0.72)) + 30, 1, n)
+        for tile_w in range(280, 119, -10):
+            tile_h = int(round(tile_w * 0.72)) + 30
+            cols = max(1, min(n, int((max_w + gap) // (tile_w + gap))))
+            rows = (n + cols - 1) // cols
+            if rows * (tile_h + gap) - gap <= max_h:
+                return tile_w, tile_h, cols, rows
+            last = (tile_w, tile_h, cols, rows)
+        return last
+
+    def _build_content(self):
+        """(Re)build the card grid for the current item list.
+
+        Tiles shrink as the window count grows so more fit per row, and the
+        overflow wraps onto new rows. Each row is centred, so a partial last
+        row does not hug the left. If the rows exceed 80% of the screen
+        height the grid scrolls instead of running off screen.
+        """
+        old = self.win.get_child()
+        if old is not None:
+            self.win.set_child(None)
+        self.cards = []
+        self.pics = []
+
+        n = len(self.items)
+        mon = self.mon or pick_monitor()
+        gap = 14
+        max_w = (mon.get("width", 1920) if mon else 1920) * 0.8
+        max_h = (mon.get("height", 1080) if mon else 1080) * 0.8
+
+        tile_w, tile_h, cols, rows = self.tile_layout(n, max_w, max_h, gap)
+        content_w = cols * (tile_w + gap) - gap
+        content_h = rows * (tile_h + gap) - gap
+
+        self.tile_w = tile_w
+        self.tile_h = tile_h
+        self.cols = cols
+
+        grid = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=gap)
+        grid.set_size_request(content_w, -1)
+        grid.set_halign(Gtk.Align.CENTER)
+        for r in range(rows):
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=gap)
+            row.set_halign(Gtk.Align.CENTER)
+            for c in range(cols):
+                k = r * cols + c
+                if k >= n:
+                    break
+                it, tex = self.items[k], self.tex[k]
+                row.append(self.build_card(self.app, k, it, tex))
+                self.cards.append(row.get_last_child())
+            grid.append(row)
+
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroller.set_child(grid)
+        scroller.set_vexpand(True)
+        self.scroller = scroller
+
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        outer.set_margin_top(MX)
+        outer.set_margin_bottom(MX)
+        outer.set_margin_start(MX)
+        outer.set_margin_end(MX)
+        outer.append(scroller)
+        self.win.set_child(outer)
+        self.win.set_default_size(content_w + MX * 2,
+                                   min(content_h, int(max_h)) + MX * 2)
 
     def build_card(self, app, i, it, tex):
         btn = Gtk.Button()
         btn.add_css_class("item")
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
 
-        prev = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-        prev.set_name("preview")
-        prev.set_size_request(CARD_W, CARD_H)
+        prev_w = self.tile_w - 12
+        prev_h = self.tile_h - 34
+
+        # Preview area; the workspace badge overlays its top-right corner.
+        overlay = Gtk.Overlay()
+        overlay.set_name("preview")
+        overlay.set_size_request(prev_w, prev_h)
+
         pic = Gtk.Picture()
         pic.set_paintable(tex if tex is not None else placeholder_tile(it))
         pic.set_content_fit(Gtk.ContentFit.CONTAIN)
-        pic.set_size_request(CARD_W, CARD_H)
-        prev.append(pic)
+        pic.set_size_request(prev_w, prev_h)
+        overlay.set_child(pic)
         self.pics.append(pic)
-        box.append(prev)
+
+        tg = Gtk.Label(label=f"ws {it['ws']}")
+        tg.set_name("ptag")
+        tg.set_halign(Gtk.Align.END)
+        tg.set_valign(Gtk.Align.START)
+        tg.set_margin_top(8)
+        tg.set_margin_end(8)
+        overlay.add_overlay(tg)
+
+        box.append(overlay)
 
         foot = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         icon_tex = load_app_icon(it["icon"], it["class"])
@@ -761,45 +981,55 @@ class Switcher:
         nm = Gtk.Label(label=it["name"])
         nm.set_name("pname")
         nm.set_ellipsize(True)
-        nm.set_max_width_chars(16)
+        nm.set_max_width_chars(max(6, self.tile_w // 14))
         nm.set_hexpand(True)
-        nm.set_xalign(0)
+        nm.set_xalign(0.5)        # centered name
+        nm.set_valign(Gtk.Align.END)
+        nm.set_margin_start(12)   # even side margins
+        nm.set_margin_end(12)
+        nm.set_margin_bottom(4)
         foot.append(nm)
-        if not it["on_view"]:
-            tg = Gtk.Label(label=f"ws {it['ws']}")
-            tg.set_name("ptag")
-            foot.append(tg)
         box.append(foot)
 
         btn.set_child(box)
-        btn.set_size_request(CARD_W + 8, ROW_H)
+        btn.set_size_request(self.tile_w, self.tile_h)
         btn.connect("clicked", lambda b, i=i: self.activate(i))
 
         motion = Gtk.EventControllerMotion()
-        motion.connect("enter", lambda m, x, y, i=i: self.select(i))
+        # "motion", not "enter": when the picker maps under a stationary
+        # pointer, GTK synthesises enter events and the card under the cursor
+        # would steal the keyboard selection the moment Alt+Tab opens. Hover
+        # only selects once the pointer actually moves.
+        motion.connect("motion", lambda m, x, y, i=i: self.select(i))
         btn.add_controller(motion)
         return btn
 
     def on_key(self, ctrl, keyval, keycode, state):
-        if self.done:
-            return True
+        if not self.visible or self.closing:
+            return False
         if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_space):
             self.activate(self.idx)
             return True
         if keyval == Gdk.KEY_Escape:
             self.cancel()
             return True
-        if keyval in (Gdk.KEY_Right, Gdk.KEY_Down):
+        if keyval in (Gdk.KEY_Right, Gdk.KEY_Tab):
             self.move(1)
             return True
-        if keyval in (Gdk.KEY_Left, Gdk.KEY_Up):
+        if keyval in (Gdk.KEY_Left, Gdk.KEY_ISO_Left_Tab):
             self.move(-1)
+            return True
+        if keyval == Gdk.KEY_Up:
+            self.select(max(0, self.idx - self.cols))
+            return True
+        if keyval == Gdk.KEY_Down:
+            self.select(min(len(self.items) - 1, self.idx + self.cols))
             return True
         return False
 
     def on_key_release(self, ctrl, keyval, keycode, state):
-        if self.done:
-            return True
+        if not self.visible or self.closing:
+            return False
         if keyval in (Gdk.KEY_Alt_L, Gdk.KEY_Alt_R):
             # Alt was being held for Alt+Tab cycling and is now released:
             # commit the highlighted card (covers Alt / Alt+Shift states —
@@ -809,7 +1039,7 @@ class Switcher:
         return False
 
     def on_active_changed(self, win, pspec):
-        if self.done:
+        if not self.visible or self.closing:
             return
         try:
             if not win.is_active():
@@ -821,7 +1051,7 @@ class Switcher:
         return list(self.cards)
 
     def select(self, i, focus_card=True):
-        if self.done:
+        if not self.visible:
             return
         n = len(self.items)
         if not n:
@@ -848,38 +1078,36 @@ class Switcher:
 
     def scroll_to(self, i):
         try:
-            scroller = self.win.get_child().get_first_child()
-            child = self.all_cards()[i]
-            adj = scroller.get_hadjustment()
-            ok, pt = child.compute_point(scroller, Gdk.Point(0, 0))
-            if not ok:
+            if self.scroller is None:
                 return False
-            w = child.get_current_allocated_size()[0]
+            adj = self.scroller.get_vadjustment()
+            row = i // max(1, self.cols)
+            y = row * (self.tile_h + 14)
             page = adj.get_page_size()
-            if adj.get_value() > pt.x:
-                adj.set_value(max(0, pt.x - 6))
-            elif adj.get_value() + page < pt.x + w + BX:
-                adj.set_value(pt.x + w + BX - page)
+            if adj.get_value() > y:
+                adj.set_value(y)
+            elif adj.get_value() + page < y + self.tile_h:
+                adj.set_value(y + self.tile_h - page)
         except Exception:
             pass
         return False
 
     def activate(self, i=None):
-        """Commit the selection: focus the exact client address, then quit.
+        """Commit the selection: focus the exact client address, then hide.
 
         The picker window itself holds focus while open, so we unmap it
-        FIRST (cancel) and dispatch focus AFTER — otherwise the compositor
-        can hand focus straight back to the overlay. Best-effort: the
-        picker always closes even if verification fails, so Alt-release
-        can never leave a stuck overlay behind.
+        FIRST and dispatch focus AFTER — otherwise the compositor can hand
+        focus straight back to the overlay. Best-effort: the picker always
+        hides even if verification fails, so Alt-release can never leave a
+        stuck overlay behind. The process stays warm for the next open.
         """
-        if self.done:
+        if not self.visible or self.closing:
             return
         if i is None:
             i = self.idx
         n = len(self.items)
         if not n:
-            self.cancel()
+            self.hide()
             return
         i = i % n
         order = list(range(n))
@@ -889,8 +1117,8 @@ class Switcher:
             a = resolve_live(self.items[k])
             if a and a not in addrs:
                 addrs.append(a)
-        self.done = True
-        self.cancel()
+        self.closing = True
+        self.hide()
         # Give the compositor a beat to unmap the overlay before focusing.
         time.sleep(0.05)
         for addr in addrs:
@@ -900,27 +1128,11 @@ class Switcher:
         # without verification (covers slow-to-map / fullscreen targets).
 
     def cancel(self):
-        if getattr(self, "_closed", False):
+        """Dismiss without switching, keeping the process resident."""
+        if not self.visible:
             return
-        self._closed = True
-        # Disarm commit handlers (key-release, focus-out): a dismiss must
-        # never re-enter activate() while the window deactivates on teardown.
-        self.done = True
-        try:
-            if os.path.exists(SOCK):
-                os.unlink(SOCK)
-        except Exception:
-            pass
-        try:
-            if os.path.exists(PID):
-                os.unlink(PID)
-        except Exception:
-            pass
-        try:
-            self.app.quit()
-        except Exception:
-            pass
-
+        self.closing = True
+        self.hide()
 
 def resolve_live(it):
     """Re-query Hyprland for the live address of item it.
@@ -959,15 +1171,14 @@ def resolve_live(it):
 
 
 def serve(listener, sw):
-    """Socket control plane: 'move n', 'close'/'commit', 'cancel'.
-    Commands arriving before the window is realized are queued in sw.pending
-    and drained after present, so a fast Alt-release is never dropped."""
+    """Socket control plane: 'open next|prev|0', 'move n', 'close'/'commit',
+    'cancel'. Commands arriving while the picker is (re)building are queued
+    in sw.pending and drained after present, so a fast Alt-release is never
+    dropped. Runs for the life of the resident picker."""
     while True:
         try:
             conn, _ = listener.accept()
         except socket.timeout:
-            if sw.done:
-                return
             continue
         except Exception:
             return
@@ -980,7 +1191,10 @@ def serve(listener, sw):
                 data += c
             line = data.decode("utf-8", "replace").strip()
             with sw.p_lock:
-                if sw.ready:
+                # Queue only while the first show is still being built; a
+                # hidden picker handles `open` immediately and drops stale
+                # move/close commands in handle_cmd.
+                if sw.ready or not sw.starting:
                     GLib.idle_add(handle_cmd, line, sw)
                 else:
                     sw.pending.append(line)
@@ -995,21 +1209,34 @@ def serve(listener, sw):
 def handle_cmd(line, sw):
     if not line or sw is None:
         return
+    parts = line.split()
+    if not parts:
+        return
+    cmd = parts[0]
+    if cmd == "ping":
+        return
+    if cmd == "open":
+        delta = 1 if "next" in parts else -1 if "prev" in parts else 0
+        sw.open(delta)
+        return
+    # Everything else only applies while the picker is on screen; a stale
+    # move/close arriving after a commit must not touch the hidden window.
+    if not sw.visible or sw.closing:
+        return
     if not sw.items:
         return
-    parts = line.split()
-    if parts[0] == "move":
+    if cmd == "move":
         try:
             d = int(parts[1]) if len(parts) > 1 else 1
         except ValueError:
             d = 1
         sw.move(d)
-    elif parts[0] in ("close", "commit"):
+    elif cmd in ("close", "commit"):
         # `close --focus` (bindrt) and `commit` are aliases: commit the
         # current selection by exact client address.
         GLib.timeout_add(PICKER_DWELL_MS,
                          lambda: sw.activate(sw.idx) or False)
-    elif parts[0] == "cancel":
+    elif cmd == "cancel":
         sw.cancel()
     return False
 
@@ -1017,6 +1244,10 @@ def handle_cmd(line, sw):
 def gui_main(start=0):
     existing = read_pid()
     if alive(existing) and existing != os.getpid():
+        return 1
+    # A resident picker may outlive a lost pid file; its socket is the
+    # authority. Never unlink and steal a socket another instance is using.
+    if socket_send("ping\n"):
         return 1
     try:
         os.makedirs(os.path.dirname(PID), exist_ok=True)
@@ -1034,13 +1265,15 @@ def gui_main(start=0):
 
     # Switcher + server start FIRST so a fast Alt-release during capture is
     # queued (sw.pending) instead of dropped by a missing socket.
-    sw = Switcher([], [], start)
+    load_gi()
+    sw = Switcher([], [], 0)
     threading.Thread(target=serve, args=(listener, sw), daemon=True).start()
 
     mon = pick_monitor()
+    sw.mon = mon
     items = window_items(mon)
     if not items:
-        _cleanup_quiet()
+        _cleanup_quiet(os.getpid())
         return 0
 
     # Open instantly with cached/icon tiles; live previews decode in the
@@ -1049,13 +1282,37 @@ def gui_main(start=0):
     textures = [initial_texture(it) for it in items]
     sw.items = items
     sw.tex = textures
-    sw.idx = start % len(items)
+    sw.gen += 1
+    if start in ("next", "prev") and len(items) > 1:
+        sw.idx = 1 if start == "next" else len(items) - 1
+    else:
+        sw.idx = int(start) % len(items) if str(start).lstrip("-").isdigit() else 0
     threading.Thread(target=sw.load_previews, args=(mon, items), daemon=True).start()
-    sw.app.run()
+    try:
+        sw.app.run()
+    finally:
+        # Idle exit (or a crash) ends the resident picker; clear its socket so
+        # the next Alt+Tab starts a fresh one (unless a newer instance took
+        # over in the meantime).
+        _cleanup_quiet(os.getpid())
     return 0
 
 
-def _cleanup_quiet():
+def _cleanup_quiet(owner=None):
+    """Remove the socket/pid files, but only if this process still owns them.
+
+    A second picker can be started after a lost pid file; the older resident
+    must not unlink the newer one's socket when it finally exits.
+    """
+    try:
+        with open(PID) as f:
+            cur = int(f.read().strip())
+    except Exception:
+        cur = None
+    if owner is not None and cur is not None and cur != owner:
+        return
+    if owner is None and cur is not None and cur != os.getpid() and alive(cur):
+        return
     try:
         if os.path.exists(SOCK):
             os.unlink(SOCK)
@@ -1092,27 +1349,25 @@ def cmd_open(args):
             profile = args[1]
         args = args[2:]
     delta = 1 if "next" in args else -1 if "prev" in args else 0
+    # The resident picker decides whether this is a first show or a move.
+    word = "next" if delta > 0 else "prev" if delta < 0 else "0"
+    if send_wait(f"open {word}\n"):
+        return 0
     pid = read_pid()
     if alive(pid):
-        if delta:
-            if send_wait(f"move {'1' if delta > 0 else '-1'}\n"):
-                return 0
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except Exception:
-                pass
-            _cleanup_quiet()
-        return 0
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except Exception:
+            pass
+        _cleanup_quiet()
     script = os.path.realpath(sys.argv[0])
-    items = window_items()
-    sel = 0
-    if delta > 0 and len(items) > 1:
-        sel = 1
-    elif delta < 0 and len(items) > 1:
-        sel = len(items) - 1
+    # The GUI child builds the item list anyway, so let it choose the initial
+    # card from the direction. Building it here too doubled the hyprctl and
+    # desktop-file work before the window could map.
+    start = "next" if delta > 0 else "prev" if delta < 0 else "0"
     try:
         subprocess.Popen(
-            [sys.executable, script, "gui", str(sel), "--profile", profile],
+            [sys.executable, script, "gui", start, "--profile", profile],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True, close_fds=True)
@@ -1129,9 +1384,18 @@ def cmd_move(delta):
 
 def cmd_close(args=None):
     # Accepts `close --focus` (bindrt release binds) — extra flags ignored.
-    if not send_wait("close\n"):
-        return 1, "switcher not running"
-    return 0, "ok"
+    if send_wait("close\n"):
+        return 0, "ok"
+    # Alt can be released before the `open` spawned a moment ago has written
+    # its pid/socket. Poll briefly so an instant press+release still commits
+    # instead of leaving the picker stuck open.
+    deadline = time.time() + 0.6
+    while time.time() < deadline:
+        pid = read_pid()
+        if alive(pid) and send_wait("close\n"):
+            return 0, "ok"
+        time.sleep(0.03)
+    return 1, "switcher not running"
 
 
 def cmd_cancel():
@@ -1294,8 +1558,13 @@ def main():
         return 0 if ok else 1
     if cmd == "gui":
         start = 0
-        if args and str(args[0]).lstrip("-").isdigit():
-            start = int(args.pop(0))
+        if args:
+            a = str(args[0])
+            if a in ("next", "prev"):
+                start = a
+                args.pop(0)
+            elif a.lstrip("-").isdigit():
+                start = int(args.pop(0))
         profile = "apps"
         if args and args[0] == "--profile":
             if len(args) > 1:
