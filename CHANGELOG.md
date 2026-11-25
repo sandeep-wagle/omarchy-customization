@@ -26,6 +26,16 @@ development (the "phases" the configs still comment about) is summarized in the
 
 ### Fixed
 
+- **Single window fills the whole workspace again** (`toggles/`) — the repo
+  shipped and installed Omarchy's `single-window-aspect-ratio` toggle, which
+  forces a lone window to a 1:1 square. On a 1920x1080 panel that is a
+  1080x1080 window centred with ~420 px of dead space on each side, and the
+  post-update restore hook re-installed it after every Omarchy update. The
+  toggle is no longer shipped; `Super+Ctrl+Backspace` still turns it on for
+  anyone who wants the square aspect.
+- **`local` used outside a function** (`bin/omarchy-emulator-mouse`) — the
+  `resume` branch is top-level code, so bash printed `local: can only be used
+  in a function` on every resume. Dropped the keyword (ShellCheck SC2168).
 - **Duplicate `Virtual-1` monitor rule forced 2400x1350 software rendering**
   (`hypr/monitors.lua`) — two conflicting rules for the KVM guest output
   (1024x768@scale 1 and 1920x1080@scale 1.25); the last one won, so the guest

@@ -339,7 +339,8 @@ case "${1:-status}" in
       if is_emulator_focused; then
         # Re-center BEFORE pressing: the cursor may sit on a desktop UI
         # element, and a synthetic press there would drag/click it.
-        local foc ax ay aw ah mon
+        # (`local` is invalid here: this branch is top-level, not in a
+        # function, and bash would fail with SC2168 at runtime.)
         foc=$(focused_json)
         ax=$(jq -r '.at[0]' <<<"$foc"); ay=$(jq -r '.at[1]' <<<"$foc")
         aw=$(jq -r '.size[0]' <<<"$foc"); ah=$(jq -r '.size[1]' <<<"$foc")
