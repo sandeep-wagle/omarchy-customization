@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ShellCheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Lint shell scripts
+        run: ./scripts/ci/check_shell.sh
+
+  python:
+    name: Python syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile Python files
+        run: |
+          mapfile -t files < <(git ls-files -z --cached --others --exclude-standard '*.py' | tr '\0' '\n')
+          while IFS= read -r -d '' f; do
+            head -n1 -- "$f" | grep -q python && files+=("$f")
+          done < <(git ls-files -z --cached --others --exclude-standard 'bin/*')
+          python3 -m py_compile "${files[@]}"
+
+  configs:
+    name: Config formats
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install validators
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lua5.4 jq
+          python3 -m pip install --quiet pyyaml
+      - name: JSON, JSONC, TOML and systemd
+        run: python3 scripts/ci/validate_configs.py
+      - name: Lua syntax
+        run: |
+          while IFS= read -r -d '' f; do
+            luac5.4 -p "$f"
+          done < <(git ls-files -z --cached --others --exclude-standard '*.lua')
+      - name: YAML syntax
+        run: |
+          python3 - <<'PY'
+          import pathlib, subprocess, sys, yaml
+          files = [f for f in subprocess.run(
+              ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard", "*.yml", "*.yaml"],
+              capture_output=True, check=True,
+          ).stdout.decode().split("\0") if f]
+          for name in files:
+              try:
+                  yaml.safe_load(pathlib.Path(name).read_text(encoding="utf-8"))
+              except yaml.YAMLError as exc:
+                  sys.exit(f"{name}: invalid YAML: {exc}")
+          print(f"YAML OK ({len(files)} files)")
+          PY
+
+  installer:
+    name: Installer smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install.sh coverage
+        run: python3 scripts/ci/check_install_pairs.py
+      - name: Apply, verify, re-apply, revert in a sandbox HOME
+        run: ./scripts/ci/smoke_install.sh
+
+  workflows:
+    name: Workflow lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: actionlint
+        run: |
+          curl -fsSL -o actionlint.tar.gz \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz
+          tar -xzf actionlint.tar.gz actionlint
+          ./actionlint -color
+
+  ci-ok:
+    name: CI OK
+    needs: [shellcheck, python, configs, installer, workflows]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Fail if any required job failed
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: |
+          echo "One or more CI jobs did not succeed." >&2
+          exit 1
+      - run: echo "All CI jobs passed."

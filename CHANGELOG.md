@@ -11,6 +11,13 @@ development (the "phases" the configs still comment about) is summarized in the
 
 ### Added
 
+- **CI/CD pipelines** (`.github/workflows/ci.yml`, `.github/workflows/cd.yml`) —
+  every push and pull request is gated on ShellCheck, Python compilation,
+  JSON/JSONC/TOML/systemd validation, Lua parsing, `install.sh` coverage and a
+  sandboxed install → verify → revert smoke test. Pushes to `main` build a
+  source archive plus `SHA256SUMS`; `v*` tags publish a GitHub Release with the
+  archive attached. The same checks run locally via
+  `scripts/ci/run-local.sh` (see `docs/CI_CD.md`).
 - **Post-update auto-restore hook** (`omarchy/hooks/post-update.d/90-restore-customization.hook`)
   — pulls this repo and re-applies every tracked config after `omarchy-update`,
   so a refresh of `~/.config/hypr/*.lua` or the Omarchy defaults no longer
