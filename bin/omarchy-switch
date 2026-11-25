@@ -803,7 +803,8 @@ class Switcher:
         if self.win is None:
             self._create_window(app)
         self._build_content()
-        self.win.present()
+        self.win.set_visible(True)    # map the window; present() alone is not
+        self.win.present()            # enough on GTK4/Wayland
         self.visible = True
         self.closing = False
         self.starting = False
