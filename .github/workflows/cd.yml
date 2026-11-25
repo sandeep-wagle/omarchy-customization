@@ -1,0 +1,82 @@
+name: CD
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cd-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify before packaging
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Installer coverage
+        run: python3 scripts/ci/check_install_pairs.py
+      - name: Sandbox install, verify, revert
+        run: ./scripts/ci/smoke_install.sh
+
+  package:
+    name: Build source archive
+    needs: verify
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      archive: ${{ steps.meta.outputs.archive }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Resolve version and archive name
+        id: meta
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            version="$GITHUB_REF_NAME"
+          else
+            version="${GITHUB_REF_NAME}-${GITHUB_SHA::7}"
+          fi
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+          echo "archive=omarchy-customization-$version.tar.gz" >>"$GITHUB_OUTPUT"
+      - name: Build archive and checksums
+        run: |
+          mkdir -p dist
+          git archive --format=tar.gz \
+            --prefix="omarchy-customization-${{ steps.meta.outputs.version }}/" \
+            -o "dist/${{ steps.meta.outputs.archive }}" HEAD
+          (cd dist && sha256sum ./*.tar.gz >SHA256SUMS)
+          cat dist/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          args=(--title "$TAG" --generate-notes --verify-tag)
+          case "$TAG" in
+            *-*) args+=(--prerelease) ;;
+          esac
+          gh release create "$TAG" dist/*.tar.gz dist/SHA256SUMS "${args[@]}"

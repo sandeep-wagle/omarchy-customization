@@ -1,5 +1,8 @@
 # Developer-first Omarchy
 
+[![CI](https://github.com/sandeep-wagle/omarchy-customization/actions/workflows/ci.yml/badge.svg)](https://github.com/sandeep-wagle/omarchy-customization/actions/workflows/ci.yml)
+[![CD](https://github.com/sandeep-wagle/omarchy-customization/actions/workflows/cd.yml/badge.svg)](https://github.com/sandeep-wagle/omarchy-customization/actions/workflows/cd.yml)
+
 > A polished, standards-oriented desktop workflow for developers who live
 > between terminals, tmux, IDEs, browsers, VMs, SSH sessions, remote servers,
 > and multiple operating systems.
@@ -390,7 +393,7 @@ deleted during install.
 | Visual `Super+Tab` workspace switcher (mogtab, current-monitor scope) | Stable |
 | Dynamic dwindle tiling (2/3/4-window arrangements) | Working — provided by Hyprland's dwindle engine |
 | Multi-monitor move (`Super+Shift+↑/↓`) and monitor-scoped switching | Working — implemented; needs real multi-monitor hardware to field-test |
-| Single-window aspect-ratio toggle | Working — enabled via `toggles/` state file; overrides the flush (single window fills by default) |
+| Single-window aspect-ratio toggle | Optional — **off by default** so a lone tiled window fills the workspace; Omarchy's `Super+Ctrl+Backspace` turns the square aspect on for anyone who wants it |
 | Reversed touchpad gestures (scroll, workspace swipe, app picker) | Working — the directional flip is compositor-native; browser back/forward lives in the app and isn't controlled by Hyprland (it follows the flipped horizontal scroll axis in most browsers) |
 | Flatpak app icons (`.desktop` under flatpak export dirs) | Working — implemented in the resolver; not yet field-tested on a machine with flatpaks |
 | Bottom dock | Not included — the taskbar lives in the top bar |
@@ -411,6 +414,9 @@ This project is intentionally open. Help is welcome for any of:
 - Quickshell/bar component improvements (taskbar, auto-hide, snap preview)
 - documentation, themes, and helper scripts
 - developer-workflow ideas and bug fixes
+- CI/CD: every PR is gated by `.github/workflows/ci.yml`; `main` packages a
+  source archive and `v*` tags publish releases. Run the same gates locally
+  with `scripts/ci/run-local.sh` — see [docs/CI_CD.md](docs/CI_CD.md)
 
 Because Linux desktop behavior varies by GPU, laptop firmware, monitor,
 keyboard, touchpad, docking station and multi-monitor setup, **community
