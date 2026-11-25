@@ -18,7 +18,7 @@ jobs:
     name: Verify before packaging
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Installer coverage
         run: python3 scripts/ci/check_install_pairs.py
       - name: Sandbox install, verify, revert
@@ -32,7 +32,7 @@ jobs:
       version: ${{ steps.meta.outputs.version }}
       archive: ${{ steps.meta.outputs.archive }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Resolve version and archive name
