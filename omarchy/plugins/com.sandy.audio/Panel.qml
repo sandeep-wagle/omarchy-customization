@@ -136,6 +136,14 @@ Panel {
   property bool canonicalOutputMuted: false
   property bool canonicalOutputLoaded: false
   property bool outputStateRestored: false
+  // Speaker and headphone ports are separate sinks on separate card profiles,
+  // so each keeps its own level and mute. Switching modes must not carry the
+  // level from one into the other.
+  property real speakersVolume: 0
+  property bool speakersMuted: false
+  property real headphonesVolume: 0
+  property bool headphonesMuted: false
+  property bool modeLevelsLoaded: false
   // Set while the panel itself writes sink volumes, so the change handler
   // cannot mistake our own write for an external volume-key press.
   property bool applyingCanonicalOutput: false
@@ -269,6 +277,10 @@ Panel {
     panelRoot.lastProfileAt = now
     Quickshell.execDetached(["bash", "-lc",
       "\"$HOME/.config/omarchy/plugins/com.sandy.audio/switch-output-profile\" " + port])
+    // A profile switch rebuilds the ALSA nodes; the capture side can come back
+    // suspended or detached. Let the switch finish, then repair the mic.
+    micHealTimer.pendingName = ""
+    micHealTimer.restart()
   }
 
   // Switching the card profile destroys the old sink and builds a new one at
@@ -292,6 +304,42 @@ Panel {
       panelRoot.persistState("speaker_sink", "")
     }
     panelRoot.setAudioSourceMode("speakers")
+  }
+
+  // Per-mode level slots. `effectiveMode` is the mode actually sounding right
+  // now, so it is the key both for saving and for restoring.
+  function modeLevel(mode) {
+    return mode === "headphones" ? panelRoot.headphonesVolume : panelRoot.speakersVolume
+  }
+
+  function modeMutedFlag(mode) {
+    return mode === "headphones" ? panelRoot.headphonesMuted : panelRoot.speakersMuted
+  }
+
+  function setModeLevel(mode, volume, muted) {
+    if (mode === "headphones") {
+      panelRoot.headphonesVolume = volume
+      panelRoot.headphonesMuted = muted
+    } else {
+      panelRoot.speakersVolume = volume
+      panelRoot.speakersMuted = muted
+    }
+  }
+
+  // Save the active canonical level into the slot for `mode`. Called before a
+  // mode switch, so the level being left behind survives the profile change.
+  function rememberModeLevel(mode) {
+    if (!panelRoot.canonicalOutputLoaded) return
+    panelRoot.setModeLevel(mode, panelRoot.canonicalOutputVolume, panelRoot.canonicalOutputMuted)
+  }
+
+  // Adopt the stored level for `mode` as the active canonical level. Called
+  // after the mode changes, so routing stages the right level on the new sink.
+  function loadModeLevel(mode) {
+    if (!panelRoot.modeLevelsLoaded) return
+    panelRoot.canonicalOutputVolume = panelRoot.modeLevel(mode)
+    panelRoot.canonicalOutputMuted = panelRoot.modeMutedFlag(mode)
+    panelRoot.canonicalOutputLoaded = true
   }
 
   // Move the DSP chain output (msi_dsp_output) onto the chosen physical sink so
@@ -403,6 +451,8 @@ Panel {
   function setAudioSourceMode(mode) {
     if (mode !== "speakers" && mode !== "headphones") mode = "speakers"
     panelRoot.captureOutputState()
+    // The level being left behind belongs to the mode still sounding.
+    panelRoot.rememberModeLevel(panelRoot.effectiveMode)
     panelRoot.beginOutputSwitch(mode === "headphones" ? "Headphones" : "Speaker")
     audioSourceMode = mode
     panelRoot.lastModeWriteAt = Date.now()
@@ -410,6 +460,9 @@ Panel {
     panelRoot.dspEnabled = panelRoot.dspForMode(panelRoot.effectiveMode)
     panelRoot.dspUserSet = true
     panelRoot.syncServiceDsp(panelRoot.dspEnabled)
+    // Adopt the target mode's own level before routing stages it.
+    panelRoot.loadModeLevel(panelRoot.effectiveMode)
+    panelRoot.persistOutputState()
     panelRoot.ensureOutputProfile(mode === "headphones" ? "Headphones" : "Speaker")
     panelRoot.applyAudioRouting()
     panelRoot.showStatus("Audio mode: " + mode, "info")
@@ -465,18 +518,53 @@ Panel {
     panelRoot.showStatus("DSP playback: " + (on ? "on" : "off"), "info")
   }
 
-// Selecting a row in OUTPUT changes the mode only. The DSP toggle stays the
-// single control for DSP on/off, and its state follows the mode's memory.
-  function selectSink(node) {
-    if (!node) return
-    var name = String(node.name || "")
-    if (name.indexOf("__Headphones__sink") >= 0) {
-      panelRoot.setAudioSourceMode("headphones")
-    } else if (name.indexOf("msi_dsp") === 0) {
-      panelRoot.setAudioSourceMode("speakers")
+  // OUTPUT is one list of descriptors: Speakers (always), Headphones (only
+  // while the jack is in, exactly like HDMI only while its cable is in), and
+  // the remaining physical sinks. The tick comes from what the panel is trying
+  // to play, never from the default sink: with DSP on the default is
+  // msi_dsp_input, which matches no row.
+  function preferredSpeakerSinkExists() {
+    if (panelRoot.preferredSpeakerSink === "") return false
+    for (var i = 0; i < panelRoot.candidateSinks.length; i++) {
+      var n = panelRoot.candidateSinks[i]
+      if (n && n.name === panelRoot.preferredSpeakerSink) return true
+    }
+    return false
+  }
+
+  function entryActive(entry) {
+    if (!entry) return false
+    var mode = panelRoot.effectiveMode
+    if (entry.kind === "headphones") return mode === "headphones"
+    if (mode !== "speakers") return false
+    if (entry.kind === "speakers") return !panelRoot.preferredSpeakerSinkExists()
+    return !!entry.node && panelRoot.preferredSpeakerSink === String(entry.node.name)
+  }
+
+  // Selecting a row only states intent: switch the card profile when the mode
+  // changes, or remember the physical sink when it is an HDMI/other output.
+  // The DSP toggle stays the single control for DSP on/off.
+  function selectEntry(entry) {
+    if (!entry) return
+    if (entry.kind === "headphones") {
+      if (panelRoot.effectiveMode !== "headphones") panelRoot.setAudioSourceMode("headphones")
+      return
+    }
+    if (entry.kind === "speakers") {
+      if (panelRoot.effectiveMode === "speakers" && !panelRoot.preferredSpeakerSinkExists()) return
+      panelRoot.setSpeakersMode()
+      return
+    }
+    var name = entry.node && entry.node.name ? String(entry.node.name) : ""
+    if (!name) return
+    if (panelRoot.effectiveMode === "speakers" && panelRoot.preferredSpeakerSink === name) return
+    panelRoot.preferredSpeakerSink = name
+    panelRoot.persistState("speaker_sink", name)
+    if (panelRoot.effectiveMode === "speakers") {
+      // Already on the Speaker profile: changing HDMI/other is just a route,
+      // not a profile switch, so no audible gap.
+      panelRoot.applyAudioRouting()
     } else {
-      panelRoot.preferredSpeakerSink = name
-      panelRoot.persistState("speaker_sink", name)
       panelRoot.setAudioSourceMode("speakers")
     }
   }
@@ -507,6 +595,10 @@ Panel {
     var sawSpeakersDsp = false
     var storedVolume = null
     var storedMuted = null
+    var storedSpeakersVolume = null
+    var storedSpeakersMuted = null
+    var storedHeadphonesVolume = null
+    var storedHeadphonesMuted = null
     for (var i = 0; i < lines.length; i++) {
       var line = lines[i]
       var eq = line.indexOf("=")
@@ -536,6 +628,16 @@ Panel {
         if (isFinite(parsed) && parsed >= 0) storedVolume = Math.min(150, parsed)
       }
       else if (key === "output_muted") storedMuted = value === "on"
+      else if (key === "output_volume_speakers") {
+        var sv = Number(value)
+        if (isFinite(sv) && sv >= 0) storedSpeakersVolume = Math.min(150, sv)
+      }
+      else if (key === "output_muted_speakers") storedSpeakersMuted = value === "on"
+      else if (key === "output_volume_headphones") {
+        var hv = Number(value)
+        if (isFinite(hv) && hv >= 0) storedHeadphonesVolume = Math.min(150, hv)
+      }
+      else if (key === "output_muted_headphones") storedHeadphonesMuted = value === "on"
       else if (key === "dsp") legacyDsp = value === "on"
     }
     // Back-compat: older state files only had a single `dsp` key.
@@ -544,17 +646,28 @@ Panel {
     panelRoot.dspUserSet = true
     panelRoot.syncServiceDsp(panelRoot.dspEnabled)
 
-    // Restore the remembered output level once. Later reads of the state file
+    // Restore the remembered output levels once. Later reads of the state file
     // only sync mode/DSP; the live sink already drives the level, so a stale
     // file (persistence is debounced) can never pull the slider backwards.
     if (!panelRoot.outputStateRestored) {
-      if (storedVolume !== null) {
-        panelRoot.canonicalOutputVolume = storedVolume / 100
-      } else {
-        panelRoot.canonicalOutputVolume = panelRoot.liveOutputVolume
-      }
-      if (storedMuted !== null) panelRoot.canonicalOutputMuted = storedMuted
-      else panelRoot.canonicalOutputMuted = panelRoot.liveOutputMuted
+      // Legacy files held one shared level. Seed both modes from it so an
+      // upgrade keeps the level the user was hearing instead of resetting one
+      // of the two.
+      var fallbackVolume = storedVolume !== null ? storedVolume / 100 : panelRoot.liveOutputVolume
+      var fallbackMuted = storedMuted !== null ? storedMuted : panelRoot.liveOutputMuted
+      panelRoot.speakersVolume = storedSpeakersVolume !== null
+        ? storedSpeakersVolume / 100 : fallbackVolume
+      panelRoot.speakersMuted = storedSpeakersMuted !== null
+        ? storedSpeakersMuted : fallbackMuted
+      panelRoot.headphonesVolume = storedHeadphonesVolume !== null
+        ? storedHeadphonesVolume / 100 : fallbackVolume
+      panelRoot.headphonesMuted = storedHeadphonesMuted !== null
+        ? storedHeadphonesMuted : fallbackMuted
+      panelRoot.modeLevelsLoaded = true
+      // effectiveMode is "speakers" until the jack probe lands, so a boot with
+      // headphones plugged in adopts the headphone level in handleJackPresence.
+      panelRoot.canonicalOutputVolume = panelRoot.modeLevel(panelRoot.effectiveMode)
+      panelRoot.canonicalOutputMuted = panelRoot.modeMutedFlag(panelRoot.effectiveMode)
       panelRoot.canonicalOutputLoaded = true
       panelRoot.outputStateRestored = true
       panelRoot.persistOutputState()
@@ -580,9 +693,13 @@ Panel {
   function handleJackPresence(present) {
     var wasLoaded = panelRoot.jackPresenceLoaded
     var wasPresent = panelRoot.prevJackPresent
+    // Capture the mode that is sounding before the jack flag flips, because
+    // effectiveMode follows the flag.
+    var previousMode = panelRoot.effectiveMode
     panelRoot.headphonesJackPresent = present
     panelRoot.jackPresenceLoaded = true
     panelRoot.prevJackPresent = present
+    panelRoot.rememberModeLevel(previousMode)
 
     if (!wasLoaded) {
       // First probe of the session: only force speakers when nothing is plugged.
@@ -596,6 +713,8 @@ Panel {
           panelRoot.beginOutputSwitch(panelRoot.audioSourceMode === "headphones" ? "Headphones" : "Speaker")
           panelRoot.ensureOutputProfile(panelRoot.audioSourceMode === "headphones" ? "Headphones" : "Speaker")
         }
+        panelRoot.loadModeLevel(panelRoot.effectiveMode)
+        panelRoot.persistOutputState()
         panelRoot.applyAudioRouting()
         return
       }
@@ -614,6 +733,8 @@ Panel {
     panelRoot.persistState("mode", panelRoot.audioSourceMode)
     panelRoot.dspEnabled = panelRoot.dspForMode(panelRoot.effectiveMode)
     panelRoot.syncServiceDsp(panelRoot.dspEnabled)
+    panelRoot.loadModeLevel(panelRoot.effectiveMode)
+    panelRoot.persistOutputState()
     panelRoot.ensureOutputProfile(present ? "Headphones" : "Speaker")
     panelRoot.applyAudioRouting()
     panelRoot.tryApplyRestoredRouting()
@@ -717,6 +838,7 @@ Panel {
     panelRoot.canonicalOutputLoaded = true
     panelRoot.canonicalOutputVolume = panelRoot.liveOutputVolume
     panelRoot.canonicalOutputMuted = panelRoot.liveOutputMuted
+    panelRoot.rememberModeLevel(panelRoot.effectiveMode)
     panelRoot.persistOutputState()
   }
 
@@ -729,6 +851,7 @@ Panel {
     if (panelRoot.volumeSink !== panelRoot.intendedOutputSink()) return
     panelRoot.canonicalOutputVolume = panelRoot.liveOutputVolume
     panelRoot.canonicalOutputMuted = panelRoot.liveOutputMuted
+    panelRoot.rememberModeLevel(panelRoot.effectiveMode)
     panelRoot.persistOutputState()
   }
 
@@ -776,9 +899,12 @@ Panel {
     showStatus("Test audio: " + volumeSink.name, "info")
   }
 
+  // Restart only WirePlumber: it re-reads the graph but keeps PipeWire and
+  // pipewire-pulse alive, so already-open apps (Brave/Meet) keep their capture
+  // connection instead of dropping to "No microphone found".
   function restartAudioService() {
-    Quickshell.execDetached(["systemctl", "--user", "restart", "pipewire.service", "pipewire-pulse.service"])
-    showStatus("Restarting audio service…", "info")
+    Quickshell.execDetached(["systemctl", "--user", "restart", "wireplumber.service"])
+    showStatus("Restarting audio routing…", "info")
   }
 
   onRawAudioSinksChanged: if (rawAudioSinks.length > 0) cachedAudioSinks = rawAudioSinks
@@ -927,8 +1053,8 @@ Panel {
     if (focusSection === "header") { toggleOutputMute(); return }
     if (focusSection === "output") {
       if (selectedIndex === -1) { toggleOutputMute(); return }
-      var sink = displayAudioSinks[selectedIndex]
-      if (sink) setDefaultSink(sink)
+      var entry = displayAudioSinks[selectedIndex]
+      if (entry) selectEntry(entry)
       return
     }
     if (focusSection === "input") {
@@ -988,41 +1114,68 @@ Panel {
     }
     availabilityRefreshTimer.restart()
   }
-  onAudioSourcesChanged: scheduleDisplayAudioModelRefresh()
+  onAudioSourcesChanged: {
+    scheduleDisplayAudioModelRefresh()
+    // Heal only when the source *topology* changes (a source appears, vanishes
+    // or is renamed), never on volume/mute changes, so this cannot loop.
+    var sig = panelRoot.currentSourceTopologySignature()
+    if (sig !== panelRoot.sourceTopologySignature) {
+      panelRoot.sourceTopologySignature = sig
+      if (panelRoot.stateRestored) {
+        micHealTimer.pendingName = ""
+        micHealTimer.restart()
+      }
+    }
+  }
   onAudioStreamsChanged: scheduleDisplayAudioModelRefresh()
 
   function listSnapshot(list) {
     return Model.listSnapshot(list)
   }
 
-  function refreshDisplayAudioModels() {
-    if (!opened) return
-    var rawSinks = listSnapshot(audioSinks)
-    var shownSinks = []
-    for (var i = 0; i < rawSinks.length; i++) {
-      var n = rawSinks[i]
+  // Build the single OUTPUT list. Descriptors keep the label/glyph stable even
+  // when a node disappears for a moment during a card-profile switch: Speakers
+  // and Headphones are named by the panel, never derived from a dying node.
+  function buildSinkEntries() {
+    var entries = []
+    var spk = null
+    var hp = null
+    var others = []
+    var list = listSnapshot(panelRoot.candidateSinks)
+    for (var i = 0; i < list.length; i++) {
+      var n = list[i]
       if (!n || !n.name) continue
       var name = String(n.name)
-      // Skip DSP input - controlled by DSP toggle inside OUTPUT section
       if (name.indexOf("msi_dsp") === 0) continue
-      // Speaker sink: always visible
-      if (name.indexOf("__Speaker__sink") >= 0) { shownSinks.push(n); continue }
-      // Headphones sink: only when physically connected
-      if (name.indexOf("__Headphones__sink") >= 0) {
-        if (panelRoot.headphonesConnected) shownSinks.push(n)
-        continue
-      }
-      // HDMI sink: only when port available (cable plugged in)
-      if (name.indexOf("HDMI") >= 0) {
-        if (panelRoot.sinkAvailable(n)) shownSinks.push(n)
-        continue
-      }
-      // Any other physical sink: show it
-      shownSinks.push(n)
+      if (name.indexOf("omarchy_speaker_tuning") === 0) continue
+      if (name.indexOf("__Speaker__sink") >= 0) { spk = n; continue }
+      if (name.indexOf("__Headphones__sink") >= 0) { hp = n; continue }
+      // HDMI/other rows only while the port is really available, and never
+      // with a placeholder label.
+      if (!panelRoot.sinkAvailable(n)) continue
+      var label = panelRoot.nodeLabel(n)
+      if (!label || String(label).toLowerCase() === "unknown") continue
+      others.push({ key: name, kind: "other", node: n, label: label, glyph: panelRoot.sinkGlyph(n) })
     }
+    // Speakers is permanent: its sink only exists while the Speaker profile is
+    // active, and selecting the row performs the profile switch.
+    entries.push({ key: "speakers", kind: "speakers", node: spk, label: "Speakers", glyph: "\uf028" })
+    // Headphones follows the jack, exactly like HDMI follows its cable.
+    if (panelRoot.headphonesConnected) {
+      entries.push({ key: "headphones", kind: "headphones", node: hp, label: "Headphones", glyph: "\uf025" })
+    }
+    for (var o = 0; o < others.length; o++) entries.push(others[o])
+    return entries
+  }
+
+  function refreshDisplayAudioModels() {
+    if (!opened) return
+    var switching = panelRoot.routingInProgress || panelRoot.outputSettle
+      || (Date.now() - panelRoot.lastProfileAt < 4000)
+    var shownSinks = panelRoot.buildSinkEntries()
 
     // Inputs: drop the DSP playback monitor. It is panel plumbing and reads as
-    // a second, broken microphone.
+    // a second, broken microphone. Rows with no real name/label are dropped.
     var rawSources = listSnapshot(audioSources)
     var shownSources = []
     for (var s = 0; s < rawSources.length; s++) {
@@ -1031,6 +1184,7 @@ Panel {
       var srcName = String(src.name)
       if (srcName.indexOf("msi_dsp") === 0) continue
       var srcLabel = panelRoot.nodeLabel(src).toLowerCase()
+      if (!srcLabel || srcLabel === "unknown") continue
       if (srcLabel.indexOf("dsp playback") !== -1 || srcLabel.indexOf("msi dsp") !== -1) continue
       shownSources.push(src)
     }
@@ -1047,7 +1201,10 @@ Panel {
     }
 
     displayAudioSinks = shownSinks
-    displayAudioSources = shownSources
+    // Never blank INPUT in the middle of a profile rebuild: keep the last good
+    // rows until the sources come back.
+    if (shownSources.length > 0 || !switching || displayAudioSources.length === 0)
+      displayAudioSources = shownSources
     displayAudioStreams = shownStreams
     clampCursor()
   }
@@ -1147,6 +1304,7 @@ Panel {
     panelRoot.canonicalOutputLoaded = true
     panelRoot.canonicalOutputVolume = display / 100
     if (display > 0) panelRoot.canonicalOutputMuted = false
+    panelRoot.rememberModeLevel(panelRoot.effectiveMode)
     panelRoot.applyCanonicalOutput()
     panelRoot.persistOutputState()
     return display
@@ -1169,6 +1327,7 @@ Panel {
     var next = !panelRoot.outputMuted
     panelRoot.canonicalOutputLoaded = true
     panelRoot.canonicalOutputMuted = next
+    panelRoot.rememberModeLevel(panelRoot.effectiveMode)
     panelRoot.applyCanonicalOutput()
     panelRoot.persistOutputState()
   }
@@ -1182,7 +1341,13 @@ Panel {
   // muting a single channel from the row below flipping the master switch.
   function toggleAllMuted() {
     var mute = anyAudible
-    if (hasOutput) volumeSink.audio.muted = mute
+    if (hasOutput) {
+      panelRoot.canonicalOutputLoaded = true
+      panelRoot.canonicalOutputMuted = mute
+      panelRoot.rememberModeLevel(panelRoot.effectiveMode)
+      panelRoot.applyCanonicalOutput()
+      panelRoot.persistOutputState()
+    }
     if (hasInput) source.audio.muted = mute
   }
 
@@ -1231,7 +1396,7 @@ Panel {
     if (verifyStage === "routing-verified") {
       panelRoot.showStatus("Output routed: " + panelRoot.friendlyDeviceLabel(pendingSinkName), "success")
     } else if (verifyStage === "default-changed") {
-      panelRoot.showStatus("Default changed: " + panelRoot.friendlyDeviceLabel(pendingSinkName), "info")
+      // internal routing detail (often the DSP node); not worth surfacing
     } else if (verifyStage === "routing-failed") {
       panelRoot.showStatus("Switch failed: routing incomplete", "error")
     } else {
@@ -1382,7 +1547,39 @@ Panel {
         String(node.id),
         String(node.name)
       ])
+      micHealTimer.pendingName = String(node.name)
+      micHealTimer.restart()
     }
+  }
+
+  // ---- Microphone auto-recovery -------------------------------------------
+  // heal-mic is idempotent: it picks a real (non-monitor, non-DSP) source,
+  // makes it default, unsuspends/unmutes it and re-homes live capture streams.
+  // It never restarts pipewire/pulse, so Brave/Meet keep their connection.
+  property double lastMicHealAt: 0
+  property string sourceTopologySignature: ""
+
+  function currentSourceTopologySignature() {
+    var parts = []
+    var list = panelRoot.candidateSources
+    for (var i = 0; i < list.length; i++) {
+      var n = list[i]
+      if (!n) continue
+      parts.push(String(n.id) + ":" + String(n.name || ""))
+    }
+    parts.sort()
+    return parts.join("|")
+  }
+
+  function healMic(preferredName) {
+    var now = Date.now()
+    if (now - panelRoot.lastMicHealAt < 3000) return
+    panelRoot.lastMicHealAt = now
+    var pref = preferredName
+      || (panelRoot.source && panelRoot.source.name ? String(panelRoot.source.name) : "")
+    Quickshell.execDetached(["bash", "-lc",
+      "\"$HOME/.config/omarchy/plugins/com.sandy.audio/heal-mic\" '"
+      + pref.replace(/'/g, "") + "'"])
   }
 
   function sinkAvailable(node) {
@@ -1619,6 +1816,16 @@ Panel {
     interval: 250
     repeat: false
     onTriggered: {
+      // Never write the slot file before the state file has been read: the
+      // slots are still at their defaults (0) and would erase the saved levels.
+      if (!panelRoot.modeLevelsLoaded) return
+      // One level per mode, so switching the port restores what the user last
+      // set there instead of carrying the other port's level across.
+      panelRoot.persistState("output_volume_speakers", String(Math.round(panelRoot.speakersVolume * 100)))
+      panelRoot.persistState("output_muted_speakers", panelRoot.speakersMuted ? "on" : "off")
+      panelRoot.persistState("output_volume_headphones", String(Math.round(panelRoot.headphonesVolume * 100)))
+      panelRoot.persistState("output_muted_headphones", panelRoot.headphonesMuted ? "on" : "off")
+      // Legacy mirror of the active mode for older readers.
       panelRoot.persistState("output_volume", String(Math.round(panelRoot.canonicalOutputVolume * 100)))
       panelRoot.persistState("output_muted", panelRoot.canonicalOutputMuted ? "on" : "off")
       // The DSP service stores its own level as real/1.5 and re-applies it
@@ -1752,6 +1959,22 @@ Panel {
     onTriggered: panelRoot.runVerifyCheck()
   }
 
+  // Debounced microphone repair. A profile switch or a source-topology change
+  // tears the capture side down for a moment; wait for it to settle, then
+  // re-home live capture streams. heal-mic never changes source topology, so
+  // this cannot feed itself.
+  Timer {
+    id: micHealTimer
+    interval: 2000
+    repeat: false
+    property string pendingName: ""
+    onTriggered: {
+      var name = pendingName
+      pendingName = ""
+      panelRoot.healMic(name)
+    }
+  }
+
   BarIconButton {
     id: button
     anchors.fill: parent
@@ -1760,6 +1983,12 @@ Panel {
     onPressed: function(b) {
       if (b === Qt.RightButton) panelRoot.toggleAllMuted()
       else panelRoot.toggle()
+    }
+
+    // Bar icon wheel used to change volume; with touchpad inertia this could
+    // jump the level on a stray scroll. Guard it the same way as the sliders.
+    WheelGuard {
+      anchors.fill: parent
     }
 
     onWheelMoved: function(delta) {
@@ -1807,6 +2036,9 @@ Panel {
           } else {
             panelRoot.toggleOutputMute()
           }
+        } else if (t === "f" || t === "F") {
+          panelRoot.healMic("")
+          panelRoot.showStatus("Repairing microphone…", "info")
         } else if (t === "r" || t === "R") {
           panelRoot.refreshDevices()
         } else if (t === "t" || t === "T") {
@@ -1874,11 +2106,12 @@ Panel {
                 onClicked: panelRoot.toggleOutputMute()
               }
 
-              // Service control: restart PipeWire when audio breaks.
+              // Service control: restart WirePlumber when routing breaks. This
+              // keeps PipeWire/pulse and every open app connected.
               PanelActionButton {
                 id: restartServiceButton
                 iconText: "\uf0e7"
-                tooltipText: "Restart audio service"
+                tooltipText: "Restart audio routing (WirePlumber)"
                 foreground: panelRoot.barForeground
                 fontFamily: panelRoot.bar ? panelRoot.bar.fontFamily : Style.fontFamily
                 fontSize: Style.font.title
@@ -1888,56 +2121,9 @@ Panel {
               }
             }
 
-            // Quick-switch: Speaker / Headphones. Always visible so the user can
-            // change outputs without unplugging/replugging headphones. Both go
-            // through setAudioSourceMode, which also switches the card profile;
-            // changing only the default sink cannot reach the other port.
-            Row {
-              id: speakerSwitcher
-              anchors.left: heroIcon.right
-              anchors.leftMargin: Style.space(10)
-              anchors.verticalCenter: parent.verticalCenter
-              spacing: Style.space(6)
-
-              Text {
-                id: speakerSwitcherSpeaker
-                textFormat: Text.PlainText
-                text: "\uf028 Speakers"
-                color: panelRoot.effectiveMode === "speakers" ? panelRoot.barForeground : panelRoot.secondaryForeground
-                font.family: panelRoot.bar ? panelRoot.bar.fontFamily : Style.fontFamily
-                font.pixelSize: Style.font.body
-                font.bold: panelRoot.effectiveMode === "speakers"
-                anchors.verticalCenter: parent.verticalCenter
-                MouseArea {
-                  anchors.fill: parent
-                  hoverEnabled: true
-                  cursorShape: Qt.PointingHandCursor
-                  onClicked: panelRoot.setSpeakersMode()
-                }
-              }
-
-              Text {
-                id: speakerSwitcherHeadphones
-                textFormat: Text.PlainText
-                text: "\uf025 Headphones"
-                color: panelRoot.effectiveMode === "headphones" ? panelRoot.barForeground : panelRoot.secondaryForeground
-                font.family: panelRoot.bar ? panelRoot.bar.fontFamily : Style.fontFamily
-                font.pixelSize: Style.font.body
-                font.bold: panelRoot.effectiveMode === "headphones"
-                anchors.verticalCenter: parent.verticalCenter
-                visible: panelRoot.headphonesConnected
-                MouseArea {
-                  anchors.fill: parent
-                  hoverEnabled: true
-                  cursorShape: Qt.PointingHandCursor
-                  onClicked: panelRoot.setAudioSourceMode("headphones")
-                }
-              }
-            }
-
             Column {
               id: heroLabels
-              anchors.left: speakerSwitcher.right
+              anchors.left: heroIcon.right
               anchors.leftMargin: Style.space(14)
               anchors.right: parent.right
               anchors.rightMargin: heroActions.width + Style.space(12)
@@ -1974,105 +2160,8 @@ Panel {
 
           }
 
-          // ---- Audio source mode selection ----
-          PanelSeparator {
-            foreground: panelRoot.barForeground
-          }
-
-          Column {
-            width: parent.width
-            spacing: Style.space(6)
-
-            Item {
-              width: parent.width
-              implicitHeight: Math.max(sourceModeHeader.implicitHeight, sourceModeRow.implicitHeight)
-
-              PanelSectionHeader {
-                id: sourceModeHeader
-                text: "AUDIO MODE"
-                foreground: panelRoot.barForeground
-                fontFamily: panelRoot.bar ? panelRoot.bar.fontFamily : Style.fontFamily
-                anchors.left: parent.left
-                anchors.verticalCenter: parent.verticalCenter
-              }
-
-              Row {
-                id: sourceModeRow
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                spacing: Style.space(10)
-
-                // Speakers mode button
-                Row {
-                  id: modeSpeakersRow
-                  spacing: Style.space(4)
-                  anchors.verticalCenter: parent.verticalCenter
-
-                  Text {
-                    text: panelRoot.audioSourceMode === "speakers" ? "✓" : "○"
-                    color: panelRoot.audioSourceMode === "speakers" ? "#8aff8a" : panelRoot.barForeground
-                    font.family: panelRoot.bar ? panelRoot.bar.fontFamily : Style.fontFamily
-                    font.pixelSize: Style.font.caption
-                    font.bold: true
-                    anchors.verticalCenter: parent.verticalCenter
-                  }
-
-                  Text {
-                    text: "\uf028 Speakers"
-                    color: panelRoot.audioSourceMode === "speakers" ? panelRoot.barForeground : panelRoot.secondaryForeground
-                    font.family: panelRoot.bar ? panelRoot.bar.fontFamily : Style.fontFamily
-                    font.pixelSize: Style.font.caption
-                    font.bold: panelRoot.audioSourceMode === "speakers"
-                    anchors.verticalCenter: parent.verticalCenter
-                    MouseArea {
-                      anchors.fill: parent
-                      hoverEnabled: true
-                      cursorShape: Qt.PointingHandCursor
-                      onClicked: panelRoot.setSpeakersMode()
-                    }
-                  }
-                }
-
-                // Headphones mode button
-                Row {
-                  id: modeHeadphonesRow
-                  visible: panelRoot.headphonesConnected
-                  spacing: Style.space(4)
-                  anchors.verticalCenter: parent.verticalCenter
-
-                  Text {
-                    text: panelRoot.audioSourceMode === "headphones" ? "✓" : "○"
-                    color: panelRoot.audioSourceMode === "headphones" ? "#8aff8a" : panelRoot.barForeground
-                    font.family: panelRoot.bar ? panelRoot.bar.fontFamily : Style.fontFamily
-                    font.pixelSize: Style.font.caption
-                    font.bold: true
-                    anchors.verticalCenter: parent.verticalCenter
-                  }
-
-                  Text {
-                    text: "\uf025 Headphones"
-                    color: panelRoot.audioSourceMode === "headphones" ? panelRoot.barForeground : panelRoot.secondaryForeground
-                    font.family: panelRoot.bar ? panelRoot.bar.fontFamily : Style.fontFamily
-                    font.pixelSize: Style.font.caption
-                    font.bold: panelRoot.audioSourceMode === "headphones"
-                    anchors.verticalCenter: parent.verticalCenter
-                    MouseArea {
-                      anchors.fill: parent
-                      hoverEnabled: true
-                      cursorShape: Qt.PointingHandCursor
-                      onClicked: panelRoot.setAudioSourceMode("headphones")
-                    }
-                  }
-                }
-              }
-            }
-
-
-          }
-
           // ---- Output devices ----
           PanelSeparator {
-            visible: panelRoot.headphonesConnected
             foreground: panelRoot.barForeground
           }
 
@@ -2192,6 +2281,13 @@ Panel {
                   panelRoot.selectedIndex = -1
                 }
               }
+
+              // A wheel over the track must never move the level: a touchpad
+              // scroll while the panel is open used to jump the volume with no
+              // click. Consume it; NoButton lets press/drag reach the slider.
+              WheelGuard {
+                anchors.fill: outputSlider
+              }
             }
 
             // DSP playback toggle: ON routes output through msi_dsp_input so
@@ -2249,19 +2345,15 @@ Panel {
                 required property var modelData
                 required property int index
                 width: panelColumn.width
-                node: modelData
+                entry: modelData
                 rowIndex: index
                 barForeground: panelRoot.barForeground
                 barFontFamily: panelRoot.bar ? panelRoot.bar.fontFamily : Style.fontFamily
                 cursorActive: panelRoot.cursorActive
                 focusSection: panelRoot.focusSection
                 selectedIndex: panelRoot.selectedIndex
-                sink: panelRoot.sink
-                sinkAvailable: panelRoot.sinkAvailable
-                isDspSink: panelRoot.isDspSink
-                sinkGlyph: panelRoot.sinkGlyph
-                nodeLabel: panelRoot.nodeLabel
-                selectSink: panelRoot.selectSink
+                entryActive: panelRoot.entryActive
+                selectEntry: panelRoot.selectEntry
                 ensureCursorVisible: panelRoot.ensureCursorVisible
               }
             }
@@ -2280,7 +2372,7 @@ Panel {
 
             Item {
               width: parent.width
-              implicitHeight: Math.max(microphoneHeader.implicitHeight, microphonePercent.implicitHeight, inputMuteButton.implicitHeight)
+              implicitHeight: Math.max(microphoneHeader.implicitHeight, microphonePercent.implicitHeight, fixMicButton.implicitHeight, inputMuteButton.implicitHeight)
 
               PanelSectionHeader {
                 id: microphoneHeader
@@ -2301,9 +2393,30 @@ Panel {
                 font.family: panelRoot.bar ? panelRoot.bar.fontFamily : Style.fontFamily
                 font.pixelSize: Style.font.caption
                 font.bold: true
-                anchors.right: inputMuteButton.left
+                anchors.right: fixMicButton.left
                 anchors.rightMargin: Style.space(8)
                 anchors.verticalCenter: parent.verticalCenter
+              }
+
+              // One-shot repair for the "No microphone found" case: repick a
+              // real source, unmute it and move live capture streams without
+              // restarting PipeWire or the app.
+              PanelActionButton {
+                id: fixMicButton
+                iconText: "\uf0ad"
+                tooltipText: "Fix microphone (F)"
+                foreground: panelRoot.barForeground
+                fontFamily: panelRoot.bar ? panelRoot.bar.fontFamily : Style.fontFamily
+                fontSize: Style.font.title
+                size: Style.space(26)
+                bordered: true
+                anchors.right: inputMuteButton.left
+                anchors.rightMargin: Style.space(6)
+                anchors.verticalCenter: parent.verticalCenter
+                onClicked: {
+                  panelRoot.healMic("")
+                  panelRoot.showStatus("Repairing microphone…", "info")
+                }
               }
 
               // Input mute is a real action, so it gets its own icon button
@@ -2383,6 +2496,12 @@ Panel {
                     color: panelRoot.barForeground
                     Behavior on width { NumberAnimation { duration: 70 } }
                   }
+                }
+
+                // Same wheel guard as the output slider. It is a sibling of
+                // the slider, so the anchor resolves.
+                WheelGuard {
+                  anchors.fill: inputSlider
                 }
               }
 
@@ -2489,33 +2608,24 @@ Panel {
   // from hasCursor/current via CursorSurface, never from containsMouse.
   component SinkRow: CursorSurface {
     id: sinkRow
-    property var node
+    property var entry
     property int rowIndex
     property color barForeground
     property string barFontFamily
     property bool cursorActive
     property string focusSection
     property int selectedIndex
-    property var sink
-    property var sinkAvailable
-    property var isDspSink
-    property var sinkGlyph
-    property var nodeLabel
-    property var selectSink
+    property var entryActive
+    property var selectEntry
     property var ensureCursorVisible
 
-    readonly property bool isValidNode: !!node
-    readonly property bool isActive: isValidNode && sink && node && sink.id === node.id
-    // Availability is advisory only (dimming); the row stays clickable.
-    readonly property bool isAvailable: isValidNode && sinkAvailable(node)
-    readonly property bool isDsp: isValidNode && isDspSink(node)
+    readonly property bool isValidEntry: !!entry
+    readonly property string label: isValidEntry && entry.label ? String(entry.label) : ""
+    readonly property string glyph: isValidEntry && entry.glyph ? String(entry.glyph) : "\uf028"
+    readonly property bool isActive: isValidEntry && entryActive(entry)
     // Active is shown by a trailing check, never by a filled row. The fill is
     // reserved for the keyboard/mouse cursor so the two states cannot be
     // mistaken for each other.
-    readonly property string statusText: !isValidNode
-      ? ""
-      : (isActive ? (isDsp ? "✓ DSP" : "✓")
-      : (isAvailable ? "" : "Disconnected"))
     readonly property color statusColor: isActive ? barForeground : panelRoot.secondaryForeground
     hasCursor: cursorActive && focusSection === "output" && selectedIndex === rowIndex
     onHasCursorChanged: if (hasCursor) ensureCursorVisible(sinkRow)
@@ -2524,7 +2634,7 @@ Panel {
     fill: hoverFill
     currentFill: selectedFill
     implicitHeight: sinkInner.implicitHeight + Style.spacing.xl
-    opacity: isAvailable ? 1.0 : 0.55
+    visible: isValidEntry && label !== ""
 
     Row {
       id: sinkInner
@@ -2538,7 +2648,7 @@ Panel {
       Text {
         id: sinkIcon
         textFormat: Text.PlainText
-        text: sinkGlyph(sinkRow.node)
+        text: sinkRow.glyph
         color: barForeground
         font.family: barFontFamily
         font.pixelSize: Style.font.title
@@ -2550,7 +2660,7 @@ Panel {
       Text {
         id: sinkName
         textFormat: Text.PlainText
-        text: nodeLabel(sinkRow.node)
+        text: sinkRow.label
         color: barForeground
         font.family: barFontFamily
         font.pixelSize: Style.font.body
@@ -2569,14 +2679,13 @@ Panel {
       Text {
         id: sinkStatus
         textFormat: Text.PlainText
-        text: sinkRow.statusText
+        text: sinkRow.isActive ? "✓" : ""
         color: sinkRow.statusColor
         font.family: barFontFamily
         font.pixelSize: Style.font.caption
         font.bold: sinkRow.isActive
-        width: Style.space(82)
+        width: Style.space(22)
         horizontalAlignment: Text.AlignRight
-        elide: Text.ElideRight
         anchors.verticalCenter: parent.verticalCenter
       }
     }
@@ -2591,7 +2700,7 @@ Panel {
         focusSection = "output"
         selectedIndex = sinkRow.rowIndex
       }
-      onClicked: selectSink(sinkRow.node)
+      onClicked: selectEntry(sinkRow.entry)
     }
   }
 
@@ -2837,6 +2946,11 @@ Panel {
           opacity: streamRow.streamMuted ? 0.5 : 1.0
           x: streamSliderWrap.thresholdX - width / 2
         }
+
+        // Same wheel guard as the output and input sliders.
+        WheelGuard {
+          anchors.fill: streamSlider
+        }
       }
     }
 
@@ -2852,5 +2966,29 @@ Panel {
         selectedIndex = streamRow.rowIndex
       }
     }
+  }
+
+  // Temporary verification hook. Removed once per-mode levels are checked.
+  IpcHandler {
+    target: "com.sandy.audio.verify"
+
+    function setMode(m) { panelRoot.setAudioSourceMode(String(m)) }
+    function setVolume(v) { panelRoot.setOutputVolume(Number(v)) }
+    function setMute(on) {
+      panelRoot.canonicalOutputLoaded = true
+      panelRoot.canonicalOutputMuted = String(on) === "true" || String(on) === "on" || String(on) === "1"
+      panelRoot.rememberModeLevel(panelRoot.effectiveMode)
+      panelRoot.applyCanonicalOutput()
+      panelRoot.persistOutputState()
+    }
+  }
+
+  // Transparent wheel blocker for sliders. A wheel event over a slider used to
+  // change the level, so an inertial touchpad scroll could jump the volume with
+  // no deliberate interaction. NoButton keeps press, drag and click flowing to
+  // the slider underneath; only the wheel is consumed.
+  component WheelGuard: MouseArea {
+    acceptedButtons: Qt.NoButton
+    onWheel: function(wheel) { wheel.accepted = true }
   }
 }

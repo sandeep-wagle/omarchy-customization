@@ -1,0 +1,91 @@
+#!/bin/bash
+# heal-mic -- make the microphone usable again WITHOUT restarting any client.
+#
+# Idempotent. In order it:
+#   1. picks a real capture source (requested name -> current default if it is
+#      not a monitor/DSP node -> first non-monitor hardware source),
+#   2. makes it the default, unsuspends it, unmutes it,
+#   3. lifts a near-silent level to 60% (anything already above 20% is kept),
+#   4. opens the ALSA capture switch,
+#   5. re-homes capture streams that are stuck on a monitor/DSP source.
+#
+# It never touches pipewire/pipewire-pulse, so Brave/Meet keep their Pulse
+# connection. Re-running it is safe and cheap.
+set -uo pipefail
+
+pref="${1:-}"
+
+is_real_source() {
+  local name="${1:-}"
+  [[ -n "$name" ]] || return 1
+  [[ "$name" == *.monitor ]] && return 1
+  [[ "$name" == msi_dsp* ]] && return 1
+  return 0
+}
+
+source_exists() {
+  pactl list short sources 2>/dev/null | awk '{print $2}' | grep -qxF -- "$1"
+}
+
+pick=""
+
+# 1. The source the panel asked for, if it is real and still present.
+if is_real_source "$pref" && source_exists "$pref"; then
+  pick="$pref"
+fi
+
+# 2. The current default, when it is a real source.
+if [[ -z "$pick" ]]; then
+  cur="$(pactl get-default-source 2>/dev/null || true)"
+  if is_real_source "$cur" && source_exists "$cur"; then
+    pick="$cur"
+  fi
+fi
+
+# 3. First real hardware capture source.
+if [[ -z "$pick" ]]; then
+  pick="$(pactl list short sources 2>/dev/null |
+    awk '$2 !~ /\.monitor$/ && $2 !~ /^msi_dsp/ {print $2; exit}')"
+fi
+
+if [[ -z "$pick" ]]; then
+  echo "heal-mic: no real capture source found" >&2
+  exit 0
+fi
+
+pactl set-default-source "$pick" 2>/dev/null || true
+pactl suspend-source "$pick" 0 2>/dev/null || true
+pactl set-source-mute "$pick" 0 2>/dev/null || true
+
+# Lift a source stuck near silence. 20% is only a floor, not a target: a level
+# the user set above it is left exactly as it is.
+pct="$(pactl list sources 2>/dev/null | awk -v n="$pick" '
+  $1 == "Name:" && $2 == n { found = 1 }
+  found && /^[[:space:]]*Volume:/ {
+    if (match($0, /[0-9]+%/)) { print substr($0, RSTART, RLENGTH - 1); exit }
+  }')"
+if [[ -z "$pct" ]] || (( pct < 20 )); then
+  pactl set-source-volume "$pick" 60% 2>/dev/null || true
+fi
+
+# Open the hardware capture switch (harmless when the card has no such control).
+amixer -c 0 sset Capture cap >/dev/null 2>&1 || true
+
+# Re-home capture streams that are attached to a monitor/DSP source (they hear
+# silence, which apps report as "no microphone found") or to a source that has
+# vanished. Streams already on a live hardware source are left alone.
+pick_idx="$(pactl list short sources 2>/dev/null | awk -v n="$pick" '$2 == n {print $1; exit}')"
+real_idx="$(pactl list short sources 2>/dev/null |
+  awk '$2 !~ /\.monitor$/ && $2 !~ /^msi_dsp/ {print $1}')"
+
+while read -r id src_idx _rest; do
+  [[ -n "${id:-}" && -n "${src_idx:-}" ]] || continue
+  [[ "$src_idx" == "$pick_idx" ]] && continue
+  # Still on a working hardware source: do not hijack a deliberate choice.
+  if [[ " $real_idx " == *" $src_idx "* ]]; then
+    continue
+  fi
+  pactl move-source-output "$id" "$pick" 2>/dev/null || true
+done < <(pactl list short source-outputs 2>/dev/null || true)
+
+echo "heal-mic: using $pick"

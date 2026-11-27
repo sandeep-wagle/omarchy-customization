@@ -10,8 +10,9 @@ Type=simple
 # leave this unit pointing at nothing. The release binary is (re)installed
 # to ~/.local/bin on every service update (see install-all.sh step 4).
 ExecStart=%h/.local/bin/msi_dsp_service
-Restart=on-failure
+Restart=always
 RestartSec=3
+WatchdogSec=30
 Nice=-5
 
 [Install]

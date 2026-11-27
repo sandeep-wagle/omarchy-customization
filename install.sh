@@ -86,6 +86,7 @@ declare -a PAIRS=(
   "omarchy/plugins/com.sandy.audio/Panel.qml|${HOME}/.config/omarchy/plugins/com.sandy.audio/Panel.qml|shell"
   "omarchy/plugins/com.sandy.audio/Model.js|${HOME}/.config/omarchy/plugins/com.sandy.audio/Model.js|shell"
   "omarchy/plugins/com.sandy.audio/switch-output-profile|${HOME}/.config/omarchy/plugins/com.sandy.audio/switch-output-profile|shell"
+  "omarchy/plugins/com.sandy.audio/heal-mic|${HOME}/.config/omarchy/plugins/com.sandy.audio/heal-mic|shell"
   "omarchy/hooks/post-update.d/90-restore-customization.hook|${HOME}/.config/omarchy/hooks/post-update.d/90-restore-customization.hook|shell"
   "omarchy/hooks/post-update.d/install-voxtype.hook|${HOME}/.config/omarchy/hooks/post-update.d/install-voxtype.hook|shell"
   "omarchy/hooks/post-update.d/setup-agent.hook|${HOME}/.config/omarchy/hooks/post-update.d/setup-agent.hook|shell"
@@ -266,6 +267,7 @@ apply() {
     "${HOME}/.local/bin/omarchy-pointer-warp" \
     "${HOME}/.local/bin/omarchy-headphone-switch" \
     "${HOME}/.config/omarchy/plugins/com.sandy.audio/switch-output-profile" \
+    "${HOME}/.config/omarchy/plugins/com.sandy.audio/heal-mic" \
     "${HOME}/.local/bin/pixel" \
     "${HOME}/.local/bin/wlrctl" \
     "${HOME}/.local/bin/msi_dsp_service" 2>/dev/null || true

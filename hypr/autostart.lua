@@ -7,6 +7,10 @@ o.launch_on_start("omarchy-switch daemon")
 -- Fullscreen trap healer: re-elevates client fullscreen dropped to tiling
 -- (maximized + video 'f'), restores maximize on video exit. Single instance.
 o.launch_on_start("omarchy-fullscreen-watch")
+-- Focus-on-close: when a window is closed, refocus the previously focused
+-- window instead of letting dwindle pick an arbitrary next window (which can
+-- drop fullscreen state). Single instance.
+o.launch_on_start("omarchy-focus-on-close")
 -- Display safety net: when the last external output is unplugged, fall back
 -- to Internal only so a disabled laptop panel can never leave a black screen.
 -- Single instance.

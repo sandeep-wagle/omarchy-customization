@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-AVD="Pixel_10_Pro"
+AVD="pixel"
 EMULATOR="$HOME/Android/Sdk/emulator/emulator"
 
 echo "Starting AVD '$AVD'..."

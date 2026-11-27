@@ -30,6 +30,12 @@ development (the "phases" the configs still comment about) is summarized in the
   `dotfiles`.
 - **`install.sh --verify`** — reports every repo file whose installed copy has
   drifted, and exits non-zero when drift exists.
+- **Microphone repair button** (`omarchy/plugins/com.sandy.audio/heal-mic`) —
+  the audio panel's wrench button (or `F`) repicks a real capture source,
+  unmutes/unsuspends it, lifts a near-silent level and re-homes live capture
+  streams without restarting PipeWire. Now tracked by `install.sh`.
+- **Superwhisper tray panel** (`omarchy/shell.json`) — dictation status is
+  available from the bar tray instead of only the settings window.
 
 ### Fixed
 
@@ -50,6 +56,26 @@ development (the "phases" the configs still comment about) is summarized in the
   `scale = 1`, which is ~44% fewer pixels for the compositor to rasterize.
   Also adds the missing trailing newline that had let an appended rule get
   glued onto the `HDMI-A-1` line.
+- **Microphone sources stay awake** (`bin/msi_dsp_service`, `systemd/msi-dsp.service`) —
+  the service now pings the systemd watchdog and unsuspends every
+  `alsa_input*` source on its 10 s loop, so browsers no longer cache
+  "No Input Devices" and dictation starts without a wake-up gap.
+  `msi-dsp.service` gained `WatchdogSec=30` and `Restart=always` to match.
+- **Speaker and headphone levels no longer bleed** (`Panel.qml`) — each mode
+  keeps its own volume and mute across card-profile switches, and the capture
+  side is healed automatically after a profile rebuild.
+- **Focus returns to the previous window on close** (`hypr/autostart.lua`) —
+  launches `omarchy-focus-on-close` so dwindle no longer picks an arbitrary
+  next window (and drops fullscreen state).
+- **Shell startup no longer errors on missing files** (`dotfiles/.bashrc`,
+  `.bash_profile`, `.profile`) — cargo/env/ble.sh are guarded with `[[ -f ]]`;
+  adds bash-completion, zoxide and `CDPATH`.
+- **Pixel emulator AVD** (`bin/pixel`) — launches the actual `pixel` AVD
+  instead of the non-existent `Pixel_10_Pro`.
+- **Chromium accessibility flag** (`terminals/chromium-flags.conf`) — adds
+  `--force-renderer-accessibility`.
+- **Monitor layout synced to live hardware** (`hypr/monitors.lua`) — eDP-1 at
+  1920x1080@144.42 with scale 1.5 and `GDK_SCALE=2`.
 
 ### Changed
 

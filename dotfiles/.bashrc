@@ -20,7 +20,7 @@ export ANDROID_SDK_ROOT="$HOME/Android/Sdk"
 export PATH="$HOME/Development/sdk/flutter/bin:$HOME/Android/Sdk/cmdline-tools/latest/bin:$HOME/Android/Sdk/platform-tools:$PATH"
 export LIBVA_DRIVER_NAME=iHD
 export ANDROID_AVD_HOME="$HOME/.config/.android/avd"
-. "$HOME/.cargo/env"
+[[ -f "$HOME/.cargo/env" ]] && . "$HOME/.cargo/env"
 
 # Only successful commands stay in history: if the last command failed
 # (typo like `fluter run`, bad flags, ...), drop it so autosuggestions never
@@ -68,11 +68,12 @@ trap '__dirhist_exit' EXIT
 # Fish-like autosuggestions + syntax highlighting (ble.sh).
 # Must stay last: it hooks the command line after everything else loads.
 # Keys: Right-arrow / End = accept suggestion, Alt+Right = accept one word.
-[[ $- == *i* ]] && source "$HOME/.local/share/blesh/out/ble.sh"
-
-# ble.sh: make Enter/Return execute commands normally, including multiline input.
-ble-bind -f 'C-m' accept-line
-ble-bind -f 'RET' accept-line
+if [[ $- == *i* && -f "$HOME/.local/share/blesh/out/ble.sh" ]]; then
+    source "$HOME/.local/share/blesh/out/ble.sh"
+    # ble.sh: make Enter/Return execute commands normally, including multiline input.
+    ble-bind -f 'C-m' accept-line
+    ble-bind -f 'RET' accept-line
+fi
 
 
 alias vm="ssh -t sandy@192.168.122.100 bash --login"
@@ -81,10 +82,30 @@ alias vm='ssh -t sandy@192.168.122.100 bash --login'
 
 alias vm='ssh -t sandy@192.168.122.100 bash --login'
 
-. "$HOME/.local/share/../bin/env"
+[[ -f "$HOME/.local/share/../bin/env" ]] && . "$HOME/.local/share/../bin/env"
 export PATH="$(npm prefix -g)/bin:$PATH"
 
 # Android SDK
 export ANDROID_HOME="$HOME/Android/Sdk"
 export ANDROID_SDK_ROOT="$ANDROID_HOME"
 export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
+
+# Android Pixel Emulator - GPU acceleration
+pixel() {
+    emulator -avd pixel -gpu host -no-snapshot-load "$@"
+}
+
+# --- Bash completion (tab autocomplete) ---
+if [[ -r /usr/share/bash-completion/bash_completion ]]; then
+    source /usr/share/bash-completion/bash_completion
+fi
+
+# --- zoxide: smarter directory jumping ---
+# Usage: z flutter   (jumps to ~/Developer/01-projects/flutter)
+#        zc flutter  (cd into it)
+if command -v zoxide &>/dev/null; then
+    eval "$(zoxide init bash)"
+fi
+
+# --- CDPATH: `cd flutter` works from anywhere ---
+export CDPATH="$CDPATH:$HOME/Developer/01-projects:$HOME/Developer/01-projects/flutter"
